@@ -1,10 +1,6 @@
-pub mod adapter;
-pub mod bot;
 pub mod ctx;
 pub mod error;
 pub mod event;
-pub mod loader;
 pub mod logger;
 pub mod message;
-pub mod plugin;
 pub mod rule;

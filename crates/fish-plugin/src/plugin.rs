@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::adapter::BaseAdapter;
-use crate::ctx::Ctx;
-use crate::event::MessageEvent;
-use crate::rule::Rule;
+use fish_adapter::adapter::BaseAdapter;
+use fish_core::ctx::Ctx;
+use fish_core::event::MessageEvent;
+use fish_core::rule::Rule;
 
 pub mod actor;
 pub mod echo;

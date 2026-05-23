@@ -1,12 +1,13 @@
 use crate::adapter::BaseAdapter;
-use crate::error::{AppError, Result};
-use crate::event::MessageEvent;
-use crate::message::MessageChain;
+use fish_core::error::{AppError, Result};
+use fish_core::event::MessageEvent;
+use fish_core::message::MessageChain;
 use async_trait::async_trait;
 use futures::stream::SplitStream;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -306,7 +307,7 @@ impl FishWebSocketAdapter {
 
     /// Ensure we have valid authentication before connecting.
     async fn ensure_auth(&self) -> Result<()> {
-        let cookies = self.api.auth().get_cookies().await;
+        let cookies: HashMap<String, String> = self.api.auth().get_cookies().await;
 
         if cookies.contains_key("unb") {
             tracing::info!("Found local auth cookies, validating...");

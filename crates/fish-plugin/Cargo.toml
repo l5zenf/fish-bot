@@ -1,0 +1,13 @@
+[package]
+name = "fish-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Plugin system with kameo actor isolation"
+
+[dependencies]
+fish-core = { workspace = true }
+fish-adapter = { workspace = true }
+kameo = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }

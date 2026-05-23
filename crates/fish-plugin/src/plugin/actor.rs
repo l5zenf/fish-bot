@@ -3,9 +3,9 @@ use std::sync::Arc;
 use kameo::prelude::*;
 use kameo::message::{Context, Message};
 
-use crate::adapter::BaseAdapter;
-use crate::ctx::Ctx;
-use crate::event::MessageEvent;
+use fish_adapter::adapter::BaseAdapter;
+use fish_core::ctx::Ctx;
+use fish_core::event::MessageEvent;
 use crate::plugin::Plugin;
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.

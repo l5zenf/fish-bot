@@ -1,4 +1,4 @@
-use crate::error::{AppError, Result};
+use fish_core::error::{AppError, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ pub struct AuthManager {
 
 impl AuthManager {
     pub fn new() -> Self {
-        let device_id = crate::adapter::fish::sign::generate_device_id("");
+        let device_id = crate::fish::sign::generate_device_id("");
 
         // Try loading from file first, then env var
         let data_dir = Self::resolve_data_dir();

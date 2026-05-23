@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::adapter::BaseAdapter;
-use crate::ctx::Ctx;
-use crate::event::MessageEvent;
-use crate::message::MessageSegment;
+use fish_adapter::adapter::BaseAdapter;
+use fish_core::ctx::Ctx;
+use fish_core::event::MessageEvent;
+use fish_core::message::MessageSegment;
 use crate::plugin::{MessageHandler, Plugin, PluginMetadata};
-use crate::rule::is_fullmatch;
+use fish_core::rule::is_fullmatch;
 
 /// Echo plugin matching Python builtin_plugins/echo.py.
 pub struct EchoPlugin;

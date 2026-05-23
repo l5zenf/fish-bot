@@ -1,7 +1,7 @@
-use crate::error::{AppError, Result};
-use crate::adapter::fish::auth::AuthManager;
+use fish_core::error::{AppError, Result};
+use crate::fish::auth::AuthManager;
 use crate::adapter::BaseAPI;
-use crate::adapter::fish::sign::{generate_sign, generate_device_id};
+use crate::fish::sign::{generate_sign, generate_device_id};
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -95,7 +95,7 @@ impl FishAPI {
         };
 
         // Get token from cookies
-        let cookies = self.auth.get_cookies().await;
+        let cookies: HashMap<String, String> = self.auth.get_cookies().await;
         let tk = cookies.get("_m_h5_tk").cloned().unwrap_or_default();
         let token = tk.split('_').next().unwrap_or("").to_string();
 
@@ -169,7 +169,7 @@ impl FishAPI {
                 if let Some(eq) = pure.find('=') {
                     let k = pure[..eq].trim().to_string();
                     let v = pure[eq + 1..].trim().to_string();
-                    if cookies.get(&k).map(|s| s.as_str()) != Some(&v) {
+                    if cookies.get(&k).map(|s: &String| s.as_str()) != Some(&v) {
                         cookies.insert(k, v);
                         cookie_updated = true;
                     }
@@ -447,7 +447,7 @@ impl FishAPI {
                 if let Some(eq) = pure.find('=') {
                     let k = pure[..eq].trim().to_string();
                     let v = pure[eq + 1..].trim().to_string();
-                    if cookies.get(&k).map(|s| s.as_str()) != Some(&v) {
+                    if cookies.get(&k).map(|s: &String| s.as_str()) != Some(&v) {
                         cookies.insert(k, v);
                         cookie_updated = true;
                     }

@@ -3,11 +3,11 @@ use std::sync::Arc;
 use kameo::prelude::*;
 use kameo::message::{Context, Message};
 
-use crate::adapter::BaseAdapter;
-use crate::ctx::Ctx;
-use crate::event::MessageEvent;
-use crate::message::{MessageChain, MessageSegment};
-use crate::plugin::actor::{HandleEvent, PluginActor};
+use fish_adapter::adapter::BaseAdapter;
+use fish_core::ctx::Ctx;
+use fish_core::event::MessageEvent;
+use fish_core::message::{MessageChain, MessageSegment};
+use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
 
 /// Bot actor — receives MessageEvents and fans out to all PluginActors.
 /// Matching Python bot.py Bot class, powered by kameo actor runtime.

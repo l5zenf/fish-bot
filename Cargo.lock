@@ -282,27 +282,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fish-bot"
+name = "fish-adapter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "fish-core",
  "futures",
- "kameo",
  "qrcode",
  "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tungstenite",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fish-bot"
+version = "0.1.0"
+dependencies = [
+ "fish-adapter",
+ "fish-core",
+ "fish-plugin",
+ "kameo",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fish-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "tungstenite",
- "urlencoding",
- "uuid",
+]
+
+[[package]]
+name = "fish-plugin"
+version = "0.1.0"
+dependencies = [
+ "fish-adapter",
+ "fish-core",
+ "kameo",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

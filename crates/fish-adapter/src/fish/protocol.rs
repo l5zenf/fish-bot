@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
-use crate::error::Result;
-use crate::message::MessageSegment;
+use fish_core::error::Result;
+use fish_core::message::MessageSegment;
 
 /// Encode a MessageSegment to fish protocol JSON Value, returning (payload, content_type).
 /// Matches Python adapters/fish/message.py auto_encode / FishPayloadNode.encode.

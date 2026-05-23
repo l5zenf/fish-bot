@@ -1,24 +1,37 @@
-[package]
-name = "fish-bot"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/*"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
+# --- runtime ---
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
-tungstenite = "0.23"
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+kameo = "0.20"
+
+# --- serialization ---
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+
+# --- network ---
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+tokio-tungstenite = { version = "0.23", features = ["native-tls"] }
+tungstenite = "0.23"
+futures = "0.3.32"
+
+# --- observability ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- utilities ---
+thiserror = "1.0"
 base64 = "0.22"
 async-trait = "0.1.89"
 regex = "1"
-kameo = "0.20"
-futures = "0.3.32"
 urlencoding = "2.1.3"
 qrcode = "0.12"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+
+# --- internal ---
+fish-core = { path = "crates/fish-core" }
+fish-adapter = { path = "crates/fish-adapter" }
+fish-plugin = { path = "crates/fish-plugin" }

@@ -1,0 +1,17 @@
+[package]
+name = "fish-bot"
+version = "0.1.0"
+edition = "2024"
+description = "Fish bot engine — kameo-based actor runtime"
+
+[[bin]]
+name = "fish-bot"
+path = "src/main.rs"
+
+[dependencies]
+fish-core = { workspace = true }
+fish-adapter = { workspace = true }
+fish-plugin = { workspace = true }
+kameo = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

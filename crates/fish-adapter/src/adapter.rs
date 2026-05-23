@@ -1,9 +1,8 @@
-use crate::error::Result;
-use crate::event::MessageEvent;
-use crate::message::MessageChain;
+use fish_core::error::Result;
+use fish_core::event::MessageEvent;
+use fish_core::message::MessageChain;
 use async_trait::async_trait;
 
-pub mod fish;
 
 /// BaseAPI trait — marker trait for API clients, matching Python adapter.py BaseAPI.
 pub trait BaseAPI: Send + Sync {}

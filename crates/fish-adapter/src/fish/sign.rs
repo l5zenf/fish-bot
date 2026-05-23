@@ -1,4 +1,4 @@
-use crate::error::Result;
+use fish_core::error::Result;
 
 pub fn generate_sign(t: &str, token: &str, data: &str) -> Result<String> {
     // TODO: real FFI call to sign_core library

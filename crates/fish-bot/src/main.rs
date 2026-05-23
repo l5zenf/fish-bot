@@ -2,15 +2,17 @@ use std::sync::Arc;
 
 use kameo::prelude::*;
 
-use fish_bot::adapter::BaseAdapter;
-use fish_bot::adapter::fish::FishWebSocketAdapter;
-use fish_bot::bot::{Bot, DispatchEvent};
-use fish_bot::ctx::Ctx;
-use fish_bot::loader::PluginManager;
-use fish_bot::logger;
-use fish_bot::plugin::actor::PluginActor;
-use fish_bot::plugin::echo::EchoPlugin;
-use fish_bot::plugin::register_plugin;
+use fish_adapter::adapter::BaseAdapter;
+use fish_adapter::fish::FishWebSocketAdapter;
+use fish_core::ctx::Ctx;
+use fish_core::logger;
+use fish_plugin::loader::PluginManager;
+use fish_plugin::plugin::actor::PluginActor;
+use fish_plugin::plugin::echo::EchoPlugin;
+use fish_plugin::plugin::register_plugin;
+
+mod bot;
+use bot::{Bot, DispatchEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,8 +20,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Build shared dependency container ----
     let ctx = Arc::new(Ctx::new());
-    // ctx.insert(MyDbPool::new(...));      // 示例：以后可以在这里注入 DB
-    // ctx.insert(MyConfig::load(...));     // 示例：以后可以在这里注入 Config
 
     // Register plugins
     register_plugin(EchoPlugin::new());
