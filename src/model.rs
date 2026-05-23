@@ -24,6 +24,7 @@ pub enum Message {
     Unknown,
 }
 
+#[derive(Debug, Clone)]
 pub struct MessageEvent {
     pub cid: String,
     pub sender_id: String,
