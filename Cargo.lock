@@ -386,6 +386,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use crate::plugin::{HandlerContext, MessageHandler, Plugin, QueueStrategy, RouteHint};
+use fish_core::telemetry::Telemetry;
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
@@ -72,6 +73,7 @@ impl PluginActor {
                         match task {
                             Some(task) => {
                                 let permit = Arc::clone(&processor_semaphore).acquire_owned().await;
+                                let queued_telemetry = Arc::clone(&task.cx.telemetry);
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     let started = std::time::Instant::now();
@@ -82,6 +84,7 @@ impl PluginActor {
                                     .await;
                                     match result {
                                         Ok(Ok(())) => {
+                                            queued_telemetry.queued_handler_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::debug!(
                                                 plugin = %task.plugin_id,
                                                 handler = %task.handler_id,
@@ -90,6 +93,7 @@ impl PluginActor {
                                             );
                                         }
                                         Ok(Err(e)) => {
+                                            queued_telemetry.queued_handler_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::error!(
                                                 plugin = %task.plugin_id,
                                                 handler = %task.handler_id,
@@ -99,6 +103,7 @@ impl PluginActor {
                                             );
                                         }
                                         Err(_) => {
+                                            queued_telemetry.queued_handler_timed_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::warn!(
                                                 plugin = %task.plugin_id,
                                                 handler = %task.handler_id,
@@ -138,12 +143,16 @@ impl PluginActor {
         event: MessageEvent,
         adapter: Arc<dyn BaseAdapter>,
         ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
     ) {
+        telemetry.handler_started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 match self.strategy {
                     QueueStrategy::DropNewest => {
+                        telemetry.drop_newest_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             plugin = %plugin_id,
                             handler = %handler.id,
@@ -152,6 +161,7 @@ impl PluginActor {
                         return;
                     }
                     QueueStrategy::DropOldest(max_queue) => {
+                        telemetry.drop_oldest_enqueues.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             plugin = %plugin_id,
                             handler = %handler.id,
@@ -163,10 +173,11 @@ impl PluginActor {
                                 handler_id: handler.id.clone(),
                                 handler_timeout: handler.timeout,
                                 plugin_id: plugin_id.to_string(),
-                                cx: HandlerContext { event, adapter: adapter.clone(), app_ctx: ctx.clone() },
+                                cx: HandlerContext { event, adapter: adapter.clone(), app_ctx: ctx.clone(), telemetry: Arc::clone(&telemetry) },
                             };
                             let mut q = queue.blocking_lock();
                             if q.len() >= max_queue {
+                                telemetry.drop_oldest_oldest_discards.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 q.pop_front(); // drop oldest
                             }
                             q.push_back(task);
@@ -183,7 +194,7 @@ impl PluginActor {
         let handler_id = handler.id.clone();
         let handler_timeout = handler.timeout;
         let plugin_id = plugin_id.to_string();
-        let cx = HandlerContext { event, adapter, app_ctx: ctx };
+        let cx = HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::clone(&telemetry) };
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -191,6 +202,7 @@ impl PluginActor {
             let result = tokio::time::timeout(handler_timeout, func(cx)).await;
             match result {
                 Ok(Ok(())) => {
+                    telemetry.handler_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::debug!(
                         plugin = %plugin_id,
                         handler = %handler_id,
@@ -199,6 +211,7 @@ impl PluginActor {
                     );
                 }
                 Ok(Err(e)) => {
+                    telemetry.handler_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::error!(
                         plugin = %plugin_id,
                         handler = %handler_id,
@@ -208,6 +221,7 @@ impl PluginActor {
                     );
                 }
                 Err(_) => {
+                    telemetry.handler_timed_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
                         plugin = %plugin_id,
                         handler = %handler_id,
@@ -229,6 +243,7 @@ pub struct HandleEvent {
     pub adapter: Arc<dyn BaseAdapter>,
     pub ctx: Arc<Ctx>,
     pub handler_id: Option<String>,
+    pub telemetry: Arc<Telemetry>,
 }
 
 impl Message<HandleEvent> for PluginActor {
@@ -287,6 +302,7 @@ impl Message<HandleEvent> for PluginActor {
                 msg.event.clone(),
                 Arc::clone(&msg.adapter),
                 Arc::clone(&msg.ctx),
+                Arc::clone(&msg.telemetry),
             );
         }
     }
@@ -299,6 +315,7 @@ mod tests {
     use super::*;
     use crate::plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
     use fish_core::event::MessageEvent;
+    use fish_core::telemetry::Telemetry;
     use fish_core::message::{MessageChain, MessageSegment};
     use fish_adapter::adapter::BaseAdapter;
     use fish_core::ctx::Ctx;
@@ -375,7 +392,7 @@ mod tests {
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(called.load(Ordering::SeqCst));
@@ -407,7 +424,7 @@ mod tests {
         let mut event = make_event("/pong");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst));
@@ -433,7 +450,7 @@ mod tests {
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -459,7 +476,7 @@ mod tests {
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -499,7 +516,7 @@ mod tests {
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "all 3 handlers should execute");
         Ok(())
@@ -531,7 +548,7 @@ mod tests {
         let mut event = make_event("/skip");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst), "handler should not be called when rule doesn't match");
         Ok(())
@@ -579,7 +596,7 @@ mod tests {
         let mut event = make_event("check");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx, handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx, handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(ctx_used.load(Ordering::SeqCst), "ctx should be passed and accessible");
         assert!(adapter_used.load(Ordering::SeqCst), "adapter should be passed and callable");
@@ -599,7 +616,7 @@ mod tests {
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -640,7 +657,7 @@ mod tests {
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         assert_eq!(call_count.load(Ordering::SeqCst), 101, "only matching rule and no-rule handlers should execute");
         Ok(())
@@ -663,7 +680,7 @@ mod tests {
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -691,7 +708,7 @@ mod tests {
         for _ in 0..3 {
             let mut event = make_event("test");
             event.set_callback(|_| Box::pin(async {}));
-            let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+            let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -716,7 +733,7 @@ mod tests {
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None, telemetry: Arc::new(Telemetry::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }

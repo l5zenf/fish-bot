@@ -108,7 +108,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
 
         assert_eq!(*captured.lock(), "Echo: /echo");
     }
@@ -157,7 +157,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
 
         assert_eq!(*captured.lock(), "Echo: ");
         Ok(())
@@ -185,7 +185,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
 
         assert_eq!(*captured.lock(), "Echo: hello");
         Ok(())

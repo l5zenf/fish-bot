@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use kameo::prelude::*;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_adapter::fish::FishWebSocketAdapter;
 use fish_core::ctx::Ctx;
+use fish_core::telemetry::Telemetry;
 mod bootstrap;
 use fish_plugin::loader::PluginManager;
 use fish_plugin::plugin::actor::PluginActor;
@@ -20,6 +22,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Build shared dependency container ----
     let ctx = Arc::new(Ctx::new());
+    let telemetry = Arc::new(Telemetry::new());
+
+    // Periodic metrics reporter: log summary every 60 seconds
+    let reporter_telemetry = Arc::clone(&telemetry);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            reporter_telemetry.log_summary();
+        }
+    });
 
     // Register plugins
     register_plugin(EchoPlugin::new());
@@ -48,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&adapter_dyn),
         plugin_refs,
         Arc::clone(&ctx),
+        telemetry,
     ));
     tracing::info!("Bot started, loaded {} plugin(s)", plugin_count);
 

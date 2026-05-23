@@ -11,6 +11,7 @@ use fish_core::ctx::Ctx;
 use fish_core::error::Result;
 use fish_core::event::MessageEvent;
 use fish_core::rule::{is_fullmatch, is_keywords, is_regex, is_startswith, Rule};
+use fish_core::telemetry::Telemetry;
 pub mod actor;
 
 pub mod echo;
@@ -76,6 +77,7 @@ pub struct HandlerContext {
     pub event: MessageEvent,
     pub adapter: Arc<dyn BaseAdapter>,
     pub app_ctx: Arc<Ctx>,
+    pub telemetry: Arc<Telemetry>,
 }
 
 /// A pinned, boxed future returned by a handler function.

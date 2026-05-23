@@ -8,6 +8,7 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use fish_core::message::{MessageChain, MessageSegment};
+use fish_core::telemetry::Telemetry;
 use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
 use fish_plugin::plugin::RouteHint;
 
@@ -32,6 +33,7 @@ pub struct Bot {
     /// PluginActor still checks the rule for these.
     fallback_routes: Vec<RouteTarget>,
     ctx: Arc<Ctx>,
+    telemetry: Arc<Telemetry>,
 }
 
 impl Bot {
@@ -39,6 +41,7 @@ impl Bot {
         adapter: Arc<dyn BaseAdapter>,
         plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
         ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
     ) -> Self {
         let mut exact_routes: HashMap<String, Vec<RouteTarget>> = HashMap::new();
         let mut prefix_routes = Vec::new();
@@ -94,6 +97,7 @@ impl Bot {
             keyword_routes,
             fallback_routes,
             ctx,
+            telemetry,
         }
     }
 }
@@ -113,26 +117,32 @@ impl Message<DispatchEvent> for Bot {
         msg: DispatchEvent,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.telemetry.messages_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Create reply callback bound to this event's sender
         let reply_adapter = Arc::clone(&self.adapter);
         let reply_cid = msg.event.cid.clone();
         let reply_target = msg.event.sender_id.clone();
+        let reply_telemetry = Arc::clone(&self.telemetry);
 
         let mut event = msg.event;
         event.set_callback(move |reply_msg: MessageSegment| {
             let adapter = Arc::clone(&reply_adapter);
             let target = reply_target.clone();
             let cid = reply_cid.clone();
+            let telemetry = Arc::clone(&reply_telemetry);
             Box::pin(async move {
                 let chain = MessageChain::from(reply_msg);
                 if let Err(e) = adapter.send(&target, &chain, Some(&cid)).await {
                     tracing::error!("Failed to send reply: {}", e);
+                    telemetry.reply_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             })
         });
 
         let adapter = Arc::clone(&self.adapter);
         let ctx = Arc::clone(&self.ctx);
+        let telemetry = Arc::clone(&self.telemetry);
 
         // Route the event using the pre-compiled routing table.
         let text = event.plain_text();
@@ -142,6 +152,7 @@ impl Message<DispatchEvent> for Bot {
 
         // 1. Exact match — O(1) HashMap lookup
         if let Some(hits) = self.exact_routes.get(&trimmed) {
+            telemetry.exact_route_hits.fetch_add(hits.len(), std::sync::atomic::Ordering::Relaxed);
             for t in hits {
                 targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
             }
@@ -150,6 +161,7 @@ impl Message<DispatchEvent> for Bot {
         // 2. Prefix match
         for (prefix, t) in &self.prefix_routes {
             if text.starts_with(prefix) {
+                telemetry.prefix_route_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
             }
         }
@@ -157,23 +169,35 @@ impl Message<DispatchEvent> for Bot {
         // 3. Keyword match
         for (kw, t) in &self.keyword_routes {
             if text.contains(kw) {
+                telemetry.keyword_route_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
             }
         }
 
         // 4. Fallback/Regex — always dispatch, PluginActor checks rule
+        let fallback_count = self.fallback_routes.len();
+        if fallback_count > 0 {
+            telemetry.fallback_dispatches.fetch_add(fallback_count, std::sync::atomic::Ordering::Relaxed);
+        }
         for t in &self.fallback_routes {
             targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
         }
 
+        // Track unmatched messages before dispatch
+        if targets.is_empty() {
+            telemetry.unmatched_messages.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Dispatch each target
         for (plugin_ref, handler_id) in targets {
+            telemetry.handler_dispatches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = plugin_ref
                 .tell(HandleEvent {
                     event: event.clone(),
                     adapter: Arc::clone(&adapter),
                     ctx: Arc::clone(&ctx),
                     handler_id: Some(handler_id),
+                    telemetry: Arc::clone(&telemetry),
                 })
                 .await;
         }
@@ -187,6 +211,7 @@ mod tests {
     use fish_adapter::adapter::BaseAdapter;
     use fish_core::error::{AppError, Result};
     use fish_core::rule::is_fullmatch;
+    use fish_core::telemetry::Telemetry;
     use fish_plugin::plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use kameo::actor::Spawn;
@@ -230,7 +255,7 @@ mod tests {
     fn t4_2_bot_new() {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
-        let bot = Bot::new(adapter, vec![], ctx);
+        let bot = Bot::new(adapter, vec![], ctx, Arc::new(Telemetry::new()));
         assert!(bot.exact_routes.is_empty());
         assert!(bot.fallback_routes.is_empty());
     }
@@ -277,7 +302,7 @@ mod tests {
         });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx, Arc::new(Telemetry::new())));
 
         let event = make_event("/ping");
 
@@ -303,7 +328,7 @@ mod tests {
         let pref1 = PluginActor::spawn(PluginActor::new(plugin1));
         let pref2 = PluginActor::spawn(PluginActor::new(plugin2));
 
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(pref1, p1), (pref2, p2)], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(pref1, p1), (pref2, p2)], ctx, Arc::new(Telemetry::new())));
 
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
@@ -319,7 +344,7 @@ mod tests {
     async fn t4_5_dispatch_empty_plugin_refs() {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![], ctx, Arc::new(Telemetry::new())));
 
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
@@ -362,7 +387,7 @@ mod tests {
         });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx, Arc::new(Telemetry::new())));
 
         let mut event = make_event("/test");
         event.set_callback(|_| Box::pin(async {}));
@@ -400,7 +425,7 @@ mod tests {
         });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx, Arc::new(Telemetry::new())));
 
         let mut event = make_event("/skip");
         event.set_callback(|_| Box::pin(async {}));
@@ -452,7 +477,7 @@ mod tests {
         });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx, Arc::new(Telemetry::new())));
 
         let event = make_event("/test");
         let _ = bot_ref.tell(DispatchEvent { event }).await;
