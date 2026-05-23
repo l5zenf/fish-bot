@@ -8,6 +8,8 @@ use reqwest::header::HeaderValue;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use urlencoding;
+use tokio::time::{sleep, Duration};
 
 /// Fish API client wrapping the MTOP (Mobile Taobao Open Platform) protocol.
 pub struct FishAPI {
@@ -133,7 +135,7 @@ impl FishAPI {
             version
         );
 
-        let body = format!("data={}", urlencoding(&data_val));
+        let body = format!("data={}", percent_encode(&data_val));
 
         tracing::debug!("MTOP call: {}?{:?}", url, params);
 
@@ -502,6 +504,170 @@ impl FishAPI {
         self.call_mtop("mtop.taobao.idle.pc.detail", "1.0", &data, Some(&extra))
             .await
     }
+
+    // ---- Auth orchestration ----
+
+    /// Ensure we have valid authentication before connecting.
+    pub async fn ensure_auth(&self) -> Result<()> {
+        let cookies: HashMap<String, String> = self.auth.get_cookies().await;
+
+        if cookies.contains_key("unb") {
+            tracing::info!("Found local auth cookies, validating...");
+            match self.get_token().await {
+                Ok(res) => {
+                    let has_access_token = res
+                        .get("data")
+                        .and_then(|d| d.get("accessToken"))
+                        .and_then(|v| v.as_str())
+                        .is_some();
+
+                    if has_access_token {
+                        let unb = cookies.get("unb").cloned().unwrap_or_default();
+                        let nick = cookies
+                            .get("tracknick")
+                            .cloned()
+                            .unwrap_or_default();
+                        let nick = urlencoding::decode(&nick)
+                            .map(|s| s.to_string())
+                            .unwrap_or(nick);
+                        tracing::info!("Successfully logged in as {} ({})", nick, unb);
+                        return Ok(());
+                    }
+
+                    let ret_str = res.to_string();
+                    if ret_str.contains("FAIL_SYS_SESSION_EXPIRED") {
+                        tracing::warn!("Session expired, need to re-login");
+                        self.auth.rm_auth_file().await;
+                        {
+                            let mut c = self.auth.cookies.lock().await;
+                            c.clear();
+                        }
+                    } else if ret_str.contains("FAIL_SYS_USER_VALIDATE") {
+                        let url = res
+                            .get("data")
+                            .and_then(|d| d.get("url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        tracing::error!(
+                            "Risk control triggered! Please complete CAPTCHA in browser: {}",
+                            url
+                        );
+                        return Err(AppError::auth(
+                            "Risk control triggered, manual CAPTCHA required",
+                        ));
+                    } else {
+                        tracing::warn!("Token invalid, trying to refresh...");
+                        match self.get_token().await {
+                            Ok(refresh_res)
+                                if refresh_res
+                                    .get("data")
+                                    .and_then(|d| d.get("accessToken"))
+                                    .is_some() =>
+                            {
+                                tracing::info!("Token refreshed successfully");
+                                return Ok(());
+                            }
+                            _ => {
+                                tracing::warn!("Token refresh failed, need to re-login");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to validate auth: {}, proceeding to QR login", e);
+                }
+            }
+        } else {
+            tracing::info!("No local auth cookies found");
+        }
+
+        self.qrcode_login_flow().await
+    }
+
+    /// Full QR code login flow: get mh5tk -> generate QR -> display -> poll -> save cookies.
+    pub async fn qrcode_login_flow(&self) -> Result<()> {
+        tracing::info!("Starting QR code login flow...");
+        println!("\n  Please scan the QR code with the Xianyu (闲鱼) app to log in.\n");
+
+        let _ = self.get_mh5tk().await?;
+        tracing::info!("Got mh5tk cookies");
+
+        let qr_data = self
+            .qrcode_gen()
+            .await?
+            .ok_or_else(|| AppError::auth("Failed to generate QR code"))?;
+
+        let content = qr_data
+            .get("content")
+            .ok_or_else(|| AppError::auth("QR code content missing"))?;
+
+        match qrcode::QrCode::new(content.as_bytes()) {
+            Ok(code) => {
+                let image = code
+                    .render::<qrcode::render::unicode::Dense1x2>()
+                    .dark_color(qrcode::render::unicode::Dense1x2::Dark)
+                    .light_color(qrcode::render::unicode::Dense1x2::Light)
+                    .build();
+                println!("{}", image);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to render QR code: {}, showing URL instead", e);
+                println!("QR Code URL: {}", content);
+            }
+        }
+
+        let t = qr_data.get("t").cloned().unwrap_or_default();
+        let ck = qr_data.get("ck").cloned().unwrap_or_default();
+
+        let mut is_scanned = false;
+        loop {
+            sleep(Duration::from_millis(1500)).await;
+
+            let result = self.qrcode_poll(&t, &ck).await?;
+            let status = result
+                .get("status")
+                .map(|s| s.as_str())
+                .unwrap_or("UNKNOWN");
+
+            match status {
+                "CONFIRMED" => {
+                    tracing::info!("Login confirmed! Session saved.");
+                    println!("  Login successful!");
+                    return Ok(());
+                }
+                "NEW" => continue,
+                "SCANED" => {
+                    if !is_scanned {
+                        is_scanned = true;
+                        tracing::info!("QR code scanned, waiting for confirmation on phone...");
+                        println!("  QR code scanned! Please confirm login on your phone.");
+                    }
+                }
+                "EXPIRED" => {
+                    tracing::warn!("QR code expired");
+                    return Err(AppError::auth("QR code expired, please restart"));
+                }
+                "CANCELED" => {
+                    tracing::info!("User cancelled login on phone");
+                    return Err(AppError::auth("Login cancelled"));
+                }
+                "ERROR" => {
+                    let redirect = result.get("redirect_url").cloned().unwrap_or_default();
+                    tracing::warn!(
+                        "Account is risk-controlled. Please visit URL to verify via SMS: {}",
+                        redirect
+                    );
+                    return Err(AppError::auth(format!(
+                        "Risk control: verify at {}",
+                        redirect
+                    )));
+                }
+                _ => {
+                    tracing::debug!("Unknown QR status: {}", status);
+                }
+            }
+        }
+    }
 }
 
 impl Clone for FishAPI {
@@ -518,7 +684,7 @@ impl Clone for FishAPI {
 impl BaseAPI for FishAPI {}
 
 /// Simple URL encoder for form bodies.
-pub fn urlencoding(input: &str) -> String {
+pub fn percent_encode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
@@ -539,20 +705,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn t3_42_urlencoding_alphanumeric() {
-        assert_eq!(urlencoding("hello123"), "hello123");
-        assert_eq!(urlencoding("ABC-DEF_ghi.~"), "ABC-DEF_ghi.~");
+    fn t3_42_percent_encode_alphanumeric() {
+        assert_eq!(percent_encode("hello123"), "hello123");
+        assert_eq!(percent_encode("ABC-DEF_ghi.~"), "ABC-DEF_ghi.~");
     }
 
     #[test]
-    fn t3_43_urlencoding_spaces() {
-        assert_eq!(urlencoding("hello world"), "hello%20world");
-        assert_eq!(urlencoding("a b c"), "a%20b%20c");
+    fn t3_43_percent_encode_spaces() {
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("a b c"), "a%20b%20c");
     }
 
     #[test]
-    fn t3_44_urlencoding_special_chars() {
-        let encoded = urlencoding("{\"key\":\"value\"}");
+    fn t3_44_percent_encode_special_chars() {
+        let encoded = percent_encode("{\"key\":\"value\"}");
         assert!(encoded.contains("%7B"));
         assert!(encoded.contains("%22"));
         assert!(encoded.contains("%3A"));
@@ -560,13 +726,13 @@ mod tests {
     }
 
     #[test]
-    fn t3_45_urlencoding_empty() {
-        assert_eq!(urlencoding(""), "");
+    fn t3_45_percent_encode_empty() {
+        assert_eq!(percent_encode(""), "");
     }
 
     #[test]
-    fn t3_46_urlencoding_chinese() -> anyhow::Result<()> {
-        let encoded = urlencoding("你好");
+    fn t3_46_percent_encode_chinese() -> anyhow::Result<()> {
+        let encoded = percent_encode("你好");
         assert!(!encoded.contains("你好"), "Chinese chars should be percent-encoded");
         assert!(encoded.len() > 2, "encoded form should be longer than raw UTF-8");
         Ok(())
@@ -665,9 +831,9 @@ mod tests {
     }
 
     #[test]
-    fn t3_67_urlencoding_special_all() -> anyhow::Result<()> {
+    fn t3_67_percent_encode_special_all() -> anyhow::Result<()> {
         // Test all special characters that should be encoded
-        let encoded = urlencoding("!@#$%^&*()+=[]{}|;:',<>?/`\"");
+        let encoded = percent_encode("!@#$%^&*()+=[]{}|;:',<>?/`\"");
         // All these chars should be percent-encoded
         assert!(!encoded.contains('!'));
         assert!(!encoded.contains('@'));

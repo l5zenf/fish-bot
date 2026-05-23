@@ -5,17 +5,18 @@
 ## 特性
 
 - **actor 隔离** — 每个插件独立 kameo actor，panic 不扩散，慢插件不阻塞快插件
-- **路由表派发** — Bot 启动时预编译路由表，exact 命令 O(1) 查表直达 handler，不扫全部插件
-- **规则引擎** — 组合式规则匹配（前缀/全匹配/关键词/正则 + and/or）
-- **依赖注入** — `Ctx` 容器按类型存取，handler 签名统一拿到 `(event, adapter, ctx)`
+- **预编译路由表** — Bot 启动时按 `RouteHint` 编译路由表，精确匹配 `O(1)`，无需遍历所有插件
+- **规则引擎** — 组合式规则：前缀 / 全匹配 / 关键词 / 正则，支持 `and` / `or` 复合
+- **单结构体 HandlerContext** — handler 统一接收 `HandlerContext { event, adapter, app_ctx, telemetry }`，不再分散三个参数
+- **可观测指标** — 18 项原子计数器（路由命中 / 派发 / 回复失败 / handler 耗时等），60s 自动输出
+- **队列策略** — 每个 PluginActor 独立 `QueueStrategy`，支持 `DropNewest`（默认）与 `DropOldest`
 - **零 unwrap** — `parking_lot` 无锁中毒，`snafu` 结构化错误，无隐式 `From`
-- **可扩展适配器** — `BaseAdapter` trait，换平台只替换 adapter 实现
+- **MTOP 协议** — 完整实现闲鱼 MTOP 签名、WebSocket 注册 / 心跳、同步、收发消息
+- **终端二维码登录** — 无凭证时自动弹出二维码，扫码即登录
 
 ## 快速开始
 
 ```bash
-mkdir -p data
-echo '{"unb":"your_id","_m_h5_tk":"..."}' > data/fish_auth.json
 RUST_LOG=info cargo run -p fish-bot
 ```
 
@@ -26,16 +27,28 @@ RUST_LOG=info cargo run -p fish-bot
 RUST_LOG=info,reqwest=warn,tungstenite=warn cargo run -p fish-bot
 ```
 
+## 架构
+
+```
+adapter (平台) → Bot (路由 & 派发) → PluginActor (handler 执行)
+    │                    │                       ├── QueueStrategy
+    │                    │                       └── Telemetry
+    ├── FishAPI          ├── exact_routes (HashMap)
+    ├── FishConnection   ├── prefix_routes
+    └── AuthManager      ├── keyword_routes
+                         └── fallback_routes
+```
+
+- **Adapter** — 与闲鱼 WebSocket 交互：登录、连接、心跳、编解码
+- **Bot** — 消息入口，按预编译路由表 `O(1)` ~ `O(n)` 派发到 PluginActor
+- **PluginActor** — 每个插件独立 actor，执行 handler，超时 / panic 不波及其它插件
+
 ## 写一个插件
 
 ```rust
 use std::sync::Arc;
-use fish_core::event::MessageEvent;
+use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler, RouteHint, HandlerContext};
 use fish_core::message::MessageSegment;
-use fish_core::rule::is_fullmatch;
-use fish_core::ctx::Ctx;
-use fish_adapter::adapter::BaseAdapter;
-use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler, RouteHint};
 
 pub struct MyPlugin {
     metadata: PluginMetadata,
@@ -51,70 +64,105 @@ impl MyPlugin {
                 description: "一个简单的 demo 插件".into(),
                 ..Default::default()
             },
-            handlers: vec![MessageHandler::new(
-                "ping",                                    // handler id（日志用）
-                RouteHint::Exact(vec!["/ping".into()]),    // 路由提示（Bot 预编译路由表）
-                Some(is_fullmatch(["/ping"])),             // 匹配规则
-                Arc::new(|event, _adapter, _ctx| {
-                    Box::pin(async move {
-                        event.reply(MessageSegment::text("pong")).await;
-                        Ok(())
-                    })
-                }),
-            )],
+            handlers: vec![
+                // RouteHint::Exact 会被 Bot 编入 HashMap，O(1) 路由
+                MessageHandler::exact(
+                    "ping",
+                    vec!["/ping"],
+                    Arc::new(|cx: HandlerContext| {
+                        Box::pin(async move {
+                            cx.event.reply(MessageSegment::text("pong")).await;
+                            Ok(())
+                        })
+                    }),
+                ),
+                // RouteHint::Prefix 走前缀匹配
+                MessageHandler::prefix(
+                    "admin",
+                    vec!["/admin"],
+                    Arc::new(|cx: HandlerContext| {
+                        Box::pin(async move {
+                            cx.event.reply(MessageSegment::text("admin cmd")).await;
+                            Ok(())
+                        })
+                    }),
+                ),
+            ],
         }
     }
 }
 
 impl Plugin for MyPlugin {
-    fn metadata(&self) -> &PluginMetadata {
-        &self.metadata
-    }
-
-    fn message_handlers(&self) -> &[MessageHandler] {
-        &self.handlers
-    }
+    fn metadata(&self) -> &PluginMetadata { &self.metadata }
+    fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
 }
 ```
 
-在 `main.rs` 注册：
+注册：
 
 ```rust
 fish_plugin::plugin::register_plugin(MyPlugin::new());
 ```
 
-## 路由提示
+### RouteHint 路线提示
 
-每个 `MessageHandler` 需要指定 `RouteHint`，告诉 Bot 如何索引这个 handler。Bot 启动时预编译路由表，消息到达时 O(1) 查表直达 handler，不再遍历所有插件。
+`RouteHint` 告诉 Bot 如何索引 handler，不参与实际匹配（那是 `Rule` 的事）。但两者应一致：
+
+| RouteHint | 对应 Rule | 路由成本 |
+|---|---|---|
+| `Exact(["msg"])` | `is_fullmatch(["msg"])` | O(1) HashMap |
+| `Prefix(["/admin"])` | `is_startswith("/admin")` | O(n) 遍历 |
+| `Keyword(["delete"])` | `is_keywords(["delete"])` | O(n) 遍历 |
+| `Regex` | `is_regex(r"...")` | 无条件派发，PluginActor 自行检查 |
+| `Fallback` | 无规则或复杂组合 | 无条件派发，PluginActor 自行检查 |
 
 ```rust
-pub enum RouteHint {
-    Exact(Vec<String>),   // 精确匹配，Bot 用 HashMap 索引
-    Prefix(Vec<String>),  // 前缀匹配，Bot 遍历前缀列表
-    Keyword(Vec<String>), // 关键词匹配，Bot 遍历关键词列表
-    Regex,                // 正则匹配，Bot 无法预过滤，由 PluginActor 检查规则
-    Fallback,             // 无条件派发，Bot 总是转发给 PluginActor，规则交 PluginActor 检查
+// 各种构造方式
+MessageHandler::exact("id", vec!["/ping"], handler)
+MessageHandler::prefix("id", vec!["/admin"], handler)
+MessageHandler::keyword("id", vec!["delete"], handler)
+MessageHandler::regex("id", r"^\d{11}$", handler)
+MessageHandler::fallback("id", handler)           // 无前置规则
+MessageHandler::new("id", RouteHint::Fallback, Some(rule), handler)  // 自定义规则
+```
+
+## HandlerContext
+
+Handler 统一接收 `HandlerContext`，包含四个字段：
+
+```rust
+pub struct HandlerContext {
+    pub event: MessageEvent,         // 消息事件（reply / plain_text）
+    pub adapter: Arc<dyn BaseAdapter>, // 发送消息的 adapter
+    pub app_ctx: Arc<Ctx>,           // 应用级依赖注入容器
+    pub telemetry: Arc<Telemetry>,   // 可观测指标
 }
 ```
 
-`RouteHint` 应与 `Rule` 一致。例如 `/ping` 用 `is_fullmatch` → `RouteHint::Exact`，Bot 验证后跳过 PluginActor 的重复规则检查。
+## 队列策略
+
+每个 `PluginActor` 支持通过 `QueueStrategy` 控制并发排队行为：
 
 ```rust
-// RouteHint 与 Rule 对应关系：
-is_fullmatch("/ping")      → RouteHint::Exact(["ping"])
-is_startswith("/admin")    → RouteHint::Prefix(["/admin"])
-is_keywords("delete")      → RouteHint::Keyword(["delete"])
-is_regex("...")            → RouteHint::Regex
-                        → RouteHint::Fallback  // 无规则或复杂组合
+QueueStrategy::DropNewest  // (默认)队列满时丢弃新事件
+QueueStrategy::DropOldest  // 队列满时丢弃最旧事件，为新事件腾位
 ```
 
-## 规则组合
+设置：
 
 ```rust
-is_startswith("/admin").and(&is_keywords("delete"))
-is_fullmatch(["/help", "/h", "帮助"])
-is_regex(r"^\d{11}$").or(&is_fullmatch(["/phone"]))
+PluginActor::with_config(plugin, QueueStrategy::DropOldest)
 ```
+
+## 可观测指标
+
+60 秒自动输出一次摘要。指标分为三层：
+
+- **路由层**: `messages_received`, `exact_route_hits`, `unmatched_messages`, `handler_dispatches` ...
+- **Handler 层**: `handler_started`, `handler_succeeded`, `handler_failed`, `handler_timed_out`
+- **队列层**: `drop_newest_drops`, `drop_oldest_enqueues`, `queued_handler_succeeded` ...
+
+Handler 内可通过 `cx.telemetry` 访问计数器。
 
 ## 依赖注入
 
@@ -124,7 +172,17 @@ let ctx = Arc::new(Ctx::new());
 ctx.insert(my_db_pool);
 
 // handler 中按类型取出
-let pool = ctx.get::<PgPool>();
+let pool = cx.app_ctx.get::<PgPool>();
+```
+
+## 规则组合
+
+```rust
+use fish_core::rule::*;
+
+is_startswith("/admin").and(&is_keywords("delete"))
+is_fullmatch(["/help", "/h", "帮助"])
+is_regex(r"^\d{11}$").or(&is_fullmatch(["/phone"]))
 ```
 
 ## License
