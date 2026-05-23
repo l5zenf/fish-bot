@@ -103,20 +103,22 @@ mod tests {
         async fn run(&self) -> Result<()> { Ok(()) }
     }
 
-    struct CounterPlugin(Arc<AtomicUsize>);
+    struct CounterPlugin {
+        meta: PluginMetadata,
+        handlers: Vec<MessageHandler>,
+    }
     impl Plugin for CounterPlugin {
-        fn metadata(&self) -> PluginMetadata {
-            PluginMetadata { id: "counter".into(), name: "".into(), description: "".into(), ..Default::default() }
-        }
-        fn message_handlers(&self) -> Vec<MessageHandler> {
-            let count = Arc::clone(&self.0);
-            vec![MessageHandler {
-                func: Arc::new(move |_, _, _| {
-                    let c = Arc::clone(&count);
-                    Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); })
-                }),
-                rule: Some(is_fullmatch(["/ping"])),
-            }]
+        fn metadata(&self) -> &PluginMetadata { &self.meta }
+        fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
+    }
+
+    fn make_counter_plugin(count: Arc<AtomicUsize>) -> CounterPlugin {
+        CounterPlugin {
+            meta: PluginMetadata { id: "counter".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("counter", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+                let c = Arc::clone(&count);
+                Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) })
+            }))],
         }
     }
 
@@ -156,24 +158,25 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(RecordAdapter(recorded_clone));
         let ctx = Arc::new(Ctx::new());
 
-        // Plugin that echoes back via reply — this triggers Bot's reply callback → adapter.send
-        struct EchoPlugin;
+        struct EchoPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for EchoPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "echo".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler {
-                    func: Arc::new(|event, _, _| {
-                        let content = event.plain_text();
-                        Box::pin(async move {
-                            let _ = event.reply(MessageSegment::text(content)).await;
-                        })
-                    }),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(EchoPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(EchoPlugin {
+            meta: PluginMetadata { id: "echo".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("echo", None, Arc::new(|event, _, _| {
+                let content = event.plain_text();
+                Box::pin(async move {
+                    let _ = event.reply(MessageSegment::text(content)).await;
+                    Ok(())
+                })
+            }))],
+        });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
         let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
@@ -183,7 +186,6 @@ mod tests {
         let _ = bot_ref.tell(DispatchEvent { event }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        // Bot should have set the reply callback → adapter.send was called with the echoed message
         let guard = recorded.lock().await;
         assert_eq!(*guard, "/ping", "adapter.send should have been called with the echoed message");
     }
@@ -196,8 +198,8 @@ mod tests {
         let count1 = Arc::new(AtomicUsize::new(0));
         let count2 = Arc::new(AtomicUsize::new(0));
 
-        let plugin1: Arc<dyn Plugin> = Arc::new(CounterPlugin(Arc::clone(&count1)));
-        let plugin2: Arc<dyn Plugin> = Arc::new(CounterPlugin(Arc::clone(&count2)));
+        let plugin1: Arc<dyn Plugin> = Arc::new(make_counter_plugin(Arc::clone(&count1)));
+        let plugin2: Arc<dyn Plugin> = Arc::new(make_counter_plugin(Arc::clone(&count2)));
         let p1 = Arc::clone(&plugin1);
         let p2 = Arc::clone(&plugin2);
         let pref1 = PluginActor::spawn(PluginActor::new(plugin1));
@@ -224,7 +226,6 @@ mod tests {
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        // Should not panic with no plugins
         let _ = bot_ref.tell(DispatchEvent { event }).await;
     }
 
@@ -243,22 +244,24 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(ErrorAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        struct ReplyPlugin;
+        struct ReplyPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for ReplyPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "reply".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler {
-                    func: Arc::new(|event, _, _| {
-                        Box::pin(async move {
-                            let _ = event.reply(MessageSegment::text("reply")).await;
-                        })
-                    }),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin {
+            meta: PluginMetadata { id: "reply".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("reply", None, Arc::new(|event, _, _| {
+                Box::pin(async move {
+                    let _ = event.reply(MessageSegment::text("reply")).await;
+                    Ok(())
+                })
+            }))],
+        });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
         let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
@@ -266,7 +269,6 @@ mod tests {
         let mut event = make_event("/test");
         event.set_callback(|_| Box::pin(async {}));
 
-        // Should not panic when adapter.send returns Err
         let _ = bot_ref.tell(DispatchEvent { event }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         Ok(())
@@ -277,25 +279,25 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
 
-        struct SelectivePlugin(Arc<AtomicBool>);
+        struct SelectivePlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for SelectivePlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "selective".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let flag = Arc::clone(&self.0);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, _, _| {
-                        let f = Arc::clone(&flag);
-                        Box::pin(async move { f.store(true, Ordering::SeqCst); })
-                    }),
-                    rule: Some(is_fullmatch(["/run"])),
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin(called_clone));
+        let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin {
+            meta: PluginMetadata { id: "selective".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("selective", Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+                let f = Arc::clone(&called_clone);
+                Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
+            }))],
+        });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
         let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
@@ -330,22 +332,24 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(RecordAdapter(recorded_clone));
         let ctx = Arc::new(Ctx::new());
 
-        struct MultiReplyPlugin;
+        struct MultiReplyPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for MultiReplyPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "multi_reply".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler {
-                    func: Arc::new(|event, _, _| {
-                        Box::pin(async move {
-                            let _ = event.reply(MessageSegment::text("multi segment reply")).await;
-                        })
-                    }),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin {
+            meta: PluginMetadata { id: "multi_reply".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("multi_reply", None, Arc::new(|event, _, _| {
+                Box::pin(async move {
+                    let _ = event.reply(MessageSegment::text("multi segment reply")).await;
+                    Ok(())
+                })
+            }))],
+        });
         let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
         let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));

@@ -53,22 +53,20 @@ impl Default for PluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{register_plugin, Plugin, PluginMetadata, MessageHandler};
+    use crate::plugin::{register_plugin, Plugin, PluginMetadata};
 
-    struct TestPluginA;
+    struct TestPluginA {
+        meta: PluginMetadata,
+    }
     impl Plugin for TestPluginA {
-        fn metadata(&self) -> PluginMetadata {
-            PluginMetadata { id: "plugin_a".into(), name: "A".into(), description: "".into(), ..Default::default() }
-        }
-        fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        fn metadata(&self) -> &PluginMetadata { &self.meta }
     }
 
-    struct TestPluginB;
+    struct TestPluginB {
+        meta: PluginMetadata,
+    }
     impl Plugin for TestPluginB {
-        fn metadata(&self) -> PluginMetadata {
-            PluginMetadata { id: "plugin_b".into(), name: "B".into(), description: "".into(), ..Default::default() }
-        }
-        fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        fn metadata(&self) -> &PluginMetadata { &self.meta }
     }
 
     #[test]
@@ -80,12 +78,11 @@ mod tests {
 
     #[test]
     fn t2_15_load_all_plugins() {
-        register_plugin(TestPluginA);
-        register_plugin(TestPluginB);
+        register_plugin(TestPluginA { meta: PluginMetadata { id: "plugin_a".into(), name: "A".into(), ..Default::default() } });
+        register_plugin(TestPluginB { meta: PluginMetadata { id: "plugin_b".into(), name: "B".into(), ..Default::default() } });
 
         let mut mgr = PluginManager::new();
         mgr.load_all_plugins();
-        // Can't assert exact len (shared global registry with other tests)
         assert!(mgr.plugins.contains_key("plugin_a"), "plugin_a should be loaded");
         assert!(mgr.plugins.contains_key("plugin_b"), "plugin_b should be loaded");
     }
@@ -98,50 +95,37 @@ mod tests {
 
     #[test]
     fn t2_16_duplicate_id_skipped() {
-        struct PluginX;
+        struct PluginX { meta: PluginMetadata }
         impl Plugin for PluginX {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "test_dupe_id".into(), name: "X".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
-        struct PluginXDuplicate;
+        struct PluginXDuplicate { meta: PluginMetadata }
         impl Plugin for PluginXDuplicate {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "test_dupe_id".into(), name: "X2".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        register_plugin(PluginX);
-        register_plugin(PluginXDuplicate);
+        register_plugin(PluginX { meta: PluginMetadata { id: "test_dupe_id".into(), name: "X".into(), ..Default::default() } });
+        register_plugin(PluginXDuplicate { meta: PluginMetadata { id: "test_dupe_id".into(), name: "X2".into(), ..Default::default() } });
 
         let mut mgr = PluginManager::new();
         mgr.load_all_plugins();
-        // Only one should be loaded for "test_dupe_id" (first one = "X" wins)
         assert!(mgr.plugins.contains_key("test_dupe_id"), "plugin should be loaded");
-        // The first registered plugin's name wins
         assert_eq!(mgr.plugins["test_dupe_id"].metadata().name, "X",
             "first registered plugin should be the one loaded");
     }
 
     #[test]
     fn t2_26_load_empty_registry() -> anyhow::Result<()> {
-        // Use distinct IDs to avoid interference from shared global registry
         let mgr = PluginManager::new();
-        // Don't call load_all_plugins since it touches the shared registry
         assert!(mgr.is_empty());
         Ok(())
     }
 
     #[test]
     fn t2_27_len_is_empty() -> anyhow::Result<()> {
-        struct DummyPlugin;
+        struct DummyPlugin { meta: PluginMetadata }
         impl Plugin for DummyPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "len_test".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
         let empty_mgr = PluginManager::new();
@@ -149,7 +133,7 @@ mod tests {
         assert!(empty_mgr.is_empty());
 
         let mut mgr = PluginManager::new();
-        mgr.plugins.insert("len_test".into(), Arc::new(DummyPlugin));
+        mgr.plugins.insert("len_test".into(), Arc::new(DummyPlugin { meta: PluginMetadata { id: "len_test".into(), ..Default::default() } }));
         assert_eq!(mgr.len(), 1);
         assert!(!mgr.is_empty());
         Ok(())
@@ -165,22 +149,20 @@ mod tests {
 
     #[test]
     fn t2_29_load_all_plugins_twice() -> anyhow::Result<()> {
-        struct OncePlugin;
+        struct OncePlugin { meta: PluginMetadata }
         impl Plugin for OncePlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "load_twice".into(), name: "Once".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        register_plugin(OncePlugin);
+        register_plugin(OncePlugin { meta: PluginMetadata { id: "load_twice".into(), name: "Once".into(), ..Default::default() } });
         let mut mgr = PluginManager::new();
         mgr.load_all_plugins();
-        let count_after_first = mgr.len();
+        let count_after_first = mgr.plugins.iter().filter(|(k, _)| *k == "load_twice").count();
+        assert_eq!(count_after_first, 1, "plugin should be loaded once");
 
-        // Load again — should skip duplicates
         mgr.load_all_plugins();
-        assert_eq!(mgr.len(), count_after_first, "loading twice should not add duplicates");
+        let count_after_second = mgr.plugins.iter().filter(|(k, _)| *k == "load_twice").count();
+        assert_eq!(count_after_second, 1, "loading twice should not add a duplicate");
         Ok(())
     }
 }

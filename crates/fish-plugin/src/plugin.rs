@@ -1,9 +1,14 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+
 use parking_lot::RwLock;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
+use fish_core::error::Result;
 use fish_core::event::MessageEvent;
 use fish_core::rule::Rule;
 
@@ -32,14 +37,33 @@ impl Default for PluginMetadata {
     }
 }
 
+/// A pinned, boxed future returned by a handler function.
+pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+/// Handler function type — takes event, adapter, context and returns a HandlerFuture.
+pub type HandlerFunc = Arc<
+    dyn Fn(MessageEvent, Arc<dyn BaseAdapter>, Arc<Ctx>) -> HandlerFuture + Send + Sync,
+>;
+
 /// A message handler registered by a plugin.
 pub struct MessageHandler {
-    pub func: Arc<
-        dyn Fn(MessageEvent, Arc<dyn BaseAdapter>, Arc<Ctx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            + Send
-            + Sync,
-    >,
+    pub id: String,
     pub rule: Option<Rule>,
+    pub timeout: Duration,
+    pub func: HandlerFunc,
+}
+
+impl MessageHandler {
+    /// Create a new handler with the given id, optional rule, and function.
+    /// Default timeout is 5 seconds.
+    pub fn new(id: impl Into<String>, rule: Option<Rule>, func: HandlerFunc) -> Self {
+        Self {
+            id: id.into(),
+            rule,
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
 }
 
 /// An event handler registered by a plugin.
@@ -55,11 +79,11 @@ pub struct EventHandler {
 
 /// Plugin trait.
 pub trait Plugin: Send + Sync + 'static {
-    fn metadata(&self) -> PluginMetadata;
+    fn metadata(&self) -> &PluginMetadata;
 
     /// Message handlers — each handler has a func and an optional Rule.
-    fn message_handlers(&self) -> Vec<MessageHandler> {
-        Vec::new()
+    fn message_handlers(&self) -> &[MessageHandler] {
+        &[]
     }
 
     /// Event handlers keyed by event type (e.g. "notice", "request", "meta_event").
@@ -73,9 +97,6 @@ pub trait Plugin: Send + Sync + 'static {
     /// Used by Bot to skip plugin actors whose rules can't match, avoiding
     /// unnecessary actor dispatch.
     fn supports(&self, event: &MessageEvent) -> bool {
-        if self.message_handlers().is_empty() {
-            return false;
-        }
         self.message_handlers().iter().any(|h| match &h.rule {
             Some(rule) => rule.check(event),
             None => true,
@@ -103,24 +124,38 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fish_core::rule::Rule;
+    use fish_adapter::adapter::BaseAdapter;
+    use async_trait::async_trait;
 
-    struct TestPlugin;
+    struct TestPlugin {
+        meta: PluginMetadata,
+        handlers: Vec<MessageHandler>,
+    }
 
-    impl Plugin for TestPlugin {
-        fn metadata(&self) -> PluginMetadata {
-            PluginMetadata {
-                id: "test".into(),
-                name: "测试插件".into(),
-                description: "测试".into(),
-                ..Default::default()
+    impl TestPlugin {
+        fn new() -> Self {
+            Self {
+                meta: PluginMetadata {
+                    id: "test".into(),
+                    name: "测试插件".into(),
+                    description: "测试".into(),
+                    ..Default::default()
+                },
+                handlers: vec![MessageHandler::new("handler1", None, Arc::new(|_, _, _| {
+                    Box::pin(async { Ok(()) })
+                }))],
             }
         }
+    }
 
-        fn message_handlers(&self) -> Vec<MessageHandler> {
-            vec![MessageHandler {
-                func: Arc::new(|_, _, _| Box::pin(async {})),
-                rule: None,
-            }]
+    impl Plugin for TestPlugin {
+        fn metadata(&self) -> &PluginMetadata {
+            &self.meta
+        }
+
+        fn message_handlers(&self) -> &[MessageHandler] {
+            &self.handlers
         }
     }
 
@@ -135,35 +170,30 @@ mod tests {
 
     #[test]
     fn t2_2_register_and_list() {
-        register_plugin(TestPlugin);
+        register_plugin(TestPlugin::new());
         let plugins = registered_plugins();
-        // We can't assert exact length because other tests may register too,
-        // but we can check our plugin is present
         let found = plugins.iter().any(|p| p.metadata().id == "test");
         assert!(found);
     }
 
     #[test]
     fn t2_4_message_handler_construct() {
-        let handler = MessageHandler {
-            func: Arc::new(|_, _, _| Box::pin(async {})),
-            rule: None,
-        };
+        let handler = MessageHandler::new("h1", None, Arc::new(|_, _, _| {
+            Box::pin(async { Ok(()) })
+        }));
         assert!(handler.rule.is_none());
     }
 
     #[test]
     fn t2_3_duplicate_registration_allowed() {
-        struct DupPlugin;
-        impl Plugin for DupPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        struct DupPlugin {
+            meta: PluginMetadata,
         }
-        // Registering the same plugin type twice should not panic
-        register_plugin(DupPlugin);
-        register_plugin(DupPlugin);
+        impl Plugin for DupPlugin {
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+        }
+        register_plugin(DupPlugin { meta: PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() } });
+        register_plugin(DupPlugin { meta: PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() } });
         let plugins = registered_plugins();
         let count = plugins.iter().filter(|p| p.metadata().id == "dup").count();
         assert_eq!(count, 2, "duplicate registration should be allowed at registry level");
@@ -171,14 +201,14 @@ mod tests {
 
     #[test]
     fn t2_18_default_event_handlers() -> anyhow::Result<()> {
-        struct EmptyPlugin;
+        struct EmptyPlugin {
+            meta: PluginMetadata,
+        }
         impl Plugin for EmptyPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata::default()
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        let plugin = EmptyPlugin;
+        let plugin = EmptyPlugin { meta: PluginMetadata::default() };
         let handlers = plugin.event_handlers();
         assert!(handlers.is_empty());
         Ok(())
@@ -186,14 +216,14 @@ mod tests {
 
     #[test]
     fn t2_19_default_message_handlers() -> anyhow::Result<()> {
-        struct EmptyPlugin;
+        struct EmptyPlugin {
+            meta: PluginMetadata,
+        }
         impl Plugin for EmptyPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata::default()
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        let plugin = EmptyPlugin;
+        let plugin = EmptyPlugin { meta: PluginMetadata::default() };
         let handlers = plugin.message_handlers();
         assert!(handlers.is_empty());
         Ok(())
@@ -217,11 +247,11 @@ mod tests {
 
     #[test]
     fn t2_32_plugin_with_event_handlers() -> anyhow::Result<()> {
-        struct EventPlugin;
+        struct EventPlugin {
+            meta: PluginMetadata,
+        }
         impl Plugin for EventPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "event_test".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
             fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
                 let mut map = HashMap::new();
                 map.insert("notice".into(), vec![EventHandler {
@@ -232,7 +262,7 @@ mod tests {
             }
         }
 
-        let plugin = EventPlugin;
+        let plugin = EventPlugin { meta: PluginMetadata { id: "event_test".into(), ..Default::default() } };
         let handlers = plugin.event_handlers();
         assert_eq!(handlers.len(), 1);
         assert!(handlers.contains_key("notice"));
@@ -258,15 +288,15 @@ mod tests {
 
     #[test]
     fn t2_34_register_plugin_increases_registry() -> anyhow::Result<()> {
-        struct RegPlugin;
+        struct RegPlugin {
+            meta: PluginMetadata,
+        }
         impl Plugin for RegPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "reg_check".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
         let before = registered_plugins().len();
-        register_plugin(RegPlugin);
+        register_plugin(RegPlugin { meta: PluginMetadata { id: "reg_check".into(), ..Default::default() } });
         let after = registered_plugins().len();
         assert!(after >= before + 1, "registry should have grown");
         Ok(())
@@ -298,10 +328,9 @@ mod tests {
 
     #[test]
     fn t2_37_message_handler_without_rule() -> anyhow::Result<()> {
-        let handler = MessageHandler {
-            func: Arc::new(|_, _, _| Box::pin(async {})),
-            rule: None,
-        };
+        let handler = MessageHandler::new("h1", None, Arc::new(|_, _, _| {
+            Box::pin(async { Ok(()) })
+        }));
         assert!(handler.rule.is_none());
         Ok(())
     }

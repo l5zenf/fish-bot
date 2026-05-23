@@ -8,38 +8,44 @@ use crate::plugin::{MessageHandler, Plugin, PluginMetadata};
 use fish_core::rule::is_fullmatch;
 
 /// Echo plugin — replies with the received message content.
-pub struct EchoPlugin;
+pub struct EchoPlugin {
+    metadata: PluginMetadata,
+    handlers: Vec<MessageHandler>,
+}
 
 impl EchoPlugin {
     pub fn new() -> Self {
-        Self
+        Self {
+            metadata: PluginMetadata {
+                id: "echo".into(),
+                name: "回声插件".into(),
+                description: "一个简单的回声插件，用于演示自动回复功能".into(),
+                version: "1.0.0".into(),
+                author: "Kaguya233qwq".into(),
+            },
+            handlers: vec![MessageHandler::new(
+                "echo",
+                Some(is_fullmatch(["/echo"])),
+                Arc::new(|event: MessageEvent, _adapter: Arc<dyn BaseAdapter>, _ctx: Arc<Ctx>| {
+                    Box::pin(async move {
+                        let content = event.plain_text().trim().to_string();
+                        let reply_msg = format!("Echo: {}", content);
+                        event.reply(MessageSegment::text(reply_msg)).await;
+                        Ok(())
+                    })
+                }),
+            )],
+        }
     }
 }
 
 impl Plugin for EchoPlugin {
-    fn metadata(&self) -> PluginMetadata {
-        PluginMetadata {
-            id: "echo".into(),
-            name: "回声插件".into(),
-            description: "一个简单的回声插件，用于演示自动回复功能".into(),
-            version: "1.0.0".into(),
-            author: "Kaguya233qwq".into(),
-        }
+    fn metadata(&self) -> &PluginMetadata {
+        &self.metadata
     }
 
-    fn message_handlers(&self) -> Vec<MessageHandler> {
-        vec![MessageHandler {
-            func: Arc::new(
-                |event: MessageEvent, _adapter: Arc<dyn BaseAdapter>, _ctx: Arc<Ctx>| {
-                    Box::pin(async move {
-                        let content = event.plain_text().trim().to_string();
-                        let reply_msg = format!("Echo: {}", content);
-                        let _ = event.reply(MessageSegment::text(reply_msg)).await;
-                    })
-                },
-            ),
-            rule: Some(is_fullmatch(["/echo"])),
-        }]
+    fn message_handlers(&self) -> &[MessageHandler] {
+        &self.handlers
     }
 }
 
@@ -106,7 +112,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(event, adapter, ctx).await;
 
         assert_eq!(*captured.lock(), "Echo: /echo");
     }
@@ -155,7 +161,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(event, adapter, ctx).await;
 
         assert_eq!(*captured.lock(), "Echo: ");
         Ok(())
@@ -183,7 +189,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(event, adapter, ctx).await;
 
         assert_eq!(*captured.lock(), "Echo: hello");
         Ok(())

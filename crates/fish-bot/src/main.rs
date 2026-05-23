@@ -37,12 +37,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugin_refs.push((actor_ref, Arc::clone(plugin)));
     }
 
-    // Create adapter
-    let adapter = Arc::new(FishWebSocketAdapter::new()) as Arc<dyn BaseAdapter>;
+    // Create adapter (keep concrete Arc<FishWebSocketAdapter> for run_arc)
+    let adapter = Arc::new(FishWebSocketAdapter::new());
+
+    // Create a trait-object clone for the Bot actor
+    let adapter_dyn: Arc<dyn BaseAdapter> = Arc::clone(&adapter) as Arc<dyn BaseAdapter>;
 
     // Spawn Bot actor — fans out events to all PluginActors with shared Ctx
     let bot_ref = Bot::spawn(Bot::new(
-        Arc::clone(&adapter),
+        Arc::clone(&adapter_dyn),
         plugin_refs,
         Arc::clone(&ctx),
     ));
@@ -50,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wire adapter callback to forward events into the Bot actor
     let bot = bot_ref.clone();
-    adapter.set_callback(Box::new(move |event| {
+    adapter_dyn.set_callback(Box::new(move |event| {
         let b = bot.clone();
         tokio::spawn(async move {
             let _ = b.tell(DispatchEvent { event }).await;
@@ -59,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run adapter (blocks until shutdown)
     tracing::info!("Starting communication adapter...");
-    adapter.run().await?;
+    adapter.run_arc().await?;
 
     Ok(())
 }

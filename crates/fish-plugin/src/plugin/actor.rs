@@ -43,9 +43,9 @@ impl Message<HandleEvent> for PluginActor {
         msg: HandleEvent,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let plugin_name = self.plugin.metadata().name.clone();
+        let plugin_id = self.plugin.metadata().id.clone();
 
-        for handler in &self.plugin.message_handlers() {
+        for handler in self.plugin.message_handlers() {
             // Check rule — if rule exists and doesn't match, skip this handler
             let matched = match &handler.rule {
                 Some(rule) => rule.check(&msg.event),
@@ -56,22 +56,63 @@ impl Message<HandleEvent> for PluginActor {
                 continue;
             }
 
+            // Try to acquire a semaphore permit before spawning.
+            // If the plugin is at capacity, drop the event with a warning
+            // instead of queuing unbounded tasks.
+            let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(
+                        plugin = %plugin_id,
+                        handler = %handler.id,
+                        "plugin busy, dropping event"
+                    );
+                    continue;
+                }
+            };
+
             let func = handler.func.clone();
+            let handler_id = handler.id.clone();
+            let handler_timeout = handler.timeout;
+            let plugin_id = plugin_id.clone();
             let event = msg.event.clone();
             let adapter = Arc::clone(&msg.adapter);
             let ctx = Arc::clone(&msg.ctx);
-            let name = plugin_name.clone();
-            let sem = Arc::clone(&self.semaphore);
 
             tokio::spawn(async move {
-                // Bound concurrency: acquire semaphore permit before running handler.
-                // Safe to unwrap: semaphore is never closed.
-                let _permit = sem.acquire_owned().await.expect("semaphore not closed");
-                func(event, adapter, ctx).await;
-            });
+                let _permit = permit;
+                let started = std::time::Instant::now();
 
-            // Suppress unused warning for name (used in debug builds)
-            let _ = &name;
+                let result = tokio::time::timeout(handler_timeout, func(event, adapter, ctx)).await;
+
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::debug!(
+                            plugin = %plugin_id,
+                            handler = %handler_id,
+                            cost_ms = started.elapsed().as_millis(),
+                            "handler finished"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            plugin = %plugin_id,
+                            handler = %handler_id,
+                            error = %e,
+                            cost_ms = started.elapsed().as_millis(),
+                            "handler failed"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            handler = %handler_id,
+                            timeout_ms = handler_timeout.as_millis(),
+                            "handler timeout"
+                        );
+                    }
+                }
+            });
         }
     }
 }
@@ -99,32 +140,35 @@ mod tests {
         async fn run(&self) -> fish_core::error::Result<()> { Ok(()) }
     }
 
-    struct TestPlugin;
+    struct TestPlugin {
+        meta: PluginMetadata,
+        handlers: Vec<MessageHandler>,
+    }
     impl Plugin for TestPlugin {
-        fn metadata(&self) -> PluginMetadata {
-            PluginMetadata { id: "test".into(), name: "test".into(), description: "".into(), ..Default::default() }
-        }
-        fn message_handlers(&self) -> Vec<MessageHandler> {
-            vec![
-                MessageHandler {
-                    func: Arc::new(|event, _, _| {
-                        let reply = event.plain_text();
-                        Box::pin(async move {
-                            let _ = event.reply(MessageSegment::text(reply)).await;
-                        })
-                    }),
-                    rule: Some(is_fullmatch(["/ping"])),
-                },
-            ]
+        fn metadata(&self) -> &PluginMetadata { &self.meta }
+        fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
+    }
+
+    fn make_test_plugin() -> TestPlugin {
+        TestPlugin {
+            meta: PluginMetadata { id: "test".into(), name: "test".into(), description: "".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("ping", Some(is_fullmatch(["/ping"])), Arc::new(|event, _, _| {
+                let reply = event.plain_text();
+                Box::pin(async move {
+                    let _ = event.reply(MessageSegment::text(reply)).await;
+                    Ok(())
+                })
+            }))],
         }
     }
+
     fn make_event(text: &str) -> MessageEvent {
         MessageEvent::new("cid".into(), "uid".into(), "name".into(), MessageChain::from(text), serde_json::json!({}))
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_5_actor_new() {
-        let plugin: Arc<dyn Plugin> = Arc::new(TestPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
         let actor = PluginActor::new(plugin);
         let _ref = PluginActor::spawn(actor);
     }
@@ -134,32 +178,28 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
 
-        struct FlagPlugin(Arc<AtomicBool>);
+        struct FlagPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for FlagPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let flag = Arc::clone(&self.0);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, _, _| {
-                        let f = Arc::clone(&flag);
-                        Box::pin(async move { f.store(true, Ordering::SeqCst); })
-                    }),
-                    rule: Some(is_fullmatch(["/ping"])),
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin(called_clone));
+        let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
+            meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("flag", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+                let f = Arc::clone(&called_clone);
+                Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(called.load(Ordering::SeqCst));
@@ -169,32 +209,29 @@ mod tests {
     async fn t2_7_rule_not_matching_skips_handler() {
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
-        struct FlagPlugin(Arc<AtomicBool>);
+
+        struct FlagPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for FlagPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let flag = Arc::clone(&self.0);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, _, _| {
-                        let f = Arc::clone(&flag);
-                        Box::pin(async move { f.store(true, Ordering::SeqCst); })
-                    }),
-                    rule: Some(is_fullmatch(["/ping"])),
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin(called_clone));
+        let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
+            meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("flag", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+                let f = Arc::clone(&called_clone);
+                Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("/pong");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst));
@@ -202,56 +239,51 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_8_no_rule_handler_always_executes() {
-        struct NoRulePlugin;
+        struct NoRulePlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for NoRulePlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "norule".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler { func: Arc::new(|_, _, _| Box::pin(async {})), rule: None }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(NoRulePlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(NoRulePlugin {
+            meta: PluginMetadata { id: "norule".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        // Should not panic — handler with no rule always runs
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_9_handler_panic_does_not_propagate() {
-        struct PanicPlugin;
+        struct PanicPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for PanicPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "panic".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler {
-                    func: Arc::new(|_, _, _| Box::pin(async { std::panic::panic_any("intentional panic") })),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(PanicPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(PanicPlugin {
+            meta: PluginMetadata { id: "panic".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("panic", None, Arc::new(|_, _, _| {
+                Box::pin(async { std::panic::panic_any("intentional panic") })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        // Panic in handler should NOT affect the actor or test
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -259,60 +291,39 @@ mod tests {
     async fn t2_21_multiple_handlers_all_execute() -> anyhow::Result<()> {
         let call_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
-        struct MultiHandlerPlugin(Arc<AtomicUsize>);
+        struct MultiHandlerPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for MultiHandlerPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "multi".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let count: Arc<AtomicUsize> = Arc::clone(&self.0);
-                vec![
-                    MessageHandler {
-                        func: Arc::new({
-                            let c: Arc<AtomicUsize> = Arc::clone(&count);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&c);
-                                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: None,
-                    },
-                    MessageHandler {
-                        func: Arc::new({
-                            let c: Arc<AtomicUsize> = Arc::clone(&count);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&c);
-                                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: None,
-                    },
-                    MessageHandler {
-                        func: Arc::new({
-                            let c: Arc<AtomicUsize> = Arc::clone(&count);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&c);
-                                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: None,
-                    },
-                ]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(MultiHandlerPlugin(Arc::clone(&call_count)));
+        let count = Arc::clone(&call_count);
+        let plugin: Arc<dyn Plugin> = Arc::new(MultiHandlerPlugin {
+            meta: PluginMetadata { id: "multi".into(), ..Default::default() },
+            handlers: vec![
+                MessageHandler::new("h1", None, Arc::new({
+                    let c = Arc::clone(&count);
+                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                })),
+                MessageHandler::new("h2", None, Arc::new({
+                    let c = Arc::clone(&count);
+                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                })),
+                MessageHandler::new("h3", None, Arc::new({
+                    let c = Arc::clone(&count);
+                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                })),
+            ],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "all 3 handlers should execute");
         Ok(())
@@ -323,35 +334,28 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
 
-        struct SkipPlugin(Arc<AtomicBool>);
+        struct SkipPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for SkipPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "skip".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let flag = Arc::clone(&self.0);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, _, _| {
-                        let f = Arc::clone(&flag);
-                        Box::pin(async move { f.store(true, Ordering::SeqCst); })
-                    }),
-                    rule: Some(is_fullmatch(["/run"])),
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(SkipPlugin(called_clone));
+        let plugin: Arc<dyn Plugin> = Arc::new(SkipPlugin {
+            meta: PluginMetadata { id: "skip".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("skip", Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+                let f = Arc::clone(&called_clone);
+                Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("/skip");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst), "handler should not be called when rule doesn't match");
         Ok(())
@@ -365,50 +369,39 @@ mod tests {
 
         let ctx_used = Arc::new(AtomicBool::new(false));
         let adapter_used = Arc::new(AtomicBool::new(false));
-        let cu = Arc::clone(&ctx_used);
-        let au = Arc::clone(&adapter_used);
 
         struct DepsPlugin {
-            ctx_check: Arc<AtomicBool>,
-            adapter_check: Arc<AtomicBool>,
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
         }
         impl Plugin for DepsPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "deps".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let cc: Arc<AtomicBool> = Arc::clone(&self.ctx_check);
-                let ac: Arc<AtomicBool> = Arc::clone(&self.adapter_check);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, adapter, handler_ctx| {
-                        let cc: Arc<AtomicBool> = Arc::clone(&cc);
-                        let ac: Arc<AtomicBool> = Arc::clone(&ac);
-                        Box::pin(async move {
-                            if handler_ctx.get::<CtxMarker>().is_some() {
-                                cc.store(true, Ordering::SeqCst);
-                            }
-                            if adapter.send("test", &MessageChain::from(""), None).await.is_ok() {
-                                ac.store(true, Ordering::SeqCst);
-                            }
-                        })
-                    }),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(DepsPlugin { ctx_check: cu, adapter_check: au });
+        let cu = Arc::clone(&ctx_used);
+        let au = Arc::clone(&adapter_used);
+        let plugin: Arc<dyn Plugin> = Arc::new(DepsPlugin {
+            meta: PluginMetadata { id: "deps".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("deps", None, Arc::new(move |_, adapter, handler_ctx| {
+                let cc = Arc::clone(&cu);
+                let ac = Arc::clone(&au);
+                Box::pin(async move {
+                    if handler_ctx.get::<CtxMarker>().is_some() {
+                        cc.store(true, Ordering::SeqCst);
+                    }
+                    let _ = adapter.send("test", &MessageChain::from(""), None).await;
+                    ac.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("check");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx,
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(ctx_used.load(Ordering::SeqCst), "ctx should be passed and accessible");
         assert!(adapter_used.load(Ordering::SeqCst), "adapter should be passed and callable");
@@ -417,25 +410,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_30_zero_handlers_does_not_panic() -> anyhow::Result<()> {
-        struct EmptyPlugin;
+        struct EmptyPlugin { meta: PluginMetadata }
         impl Plugin for EmptyPlugin {
-            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "empty".into(), name: "".into(), description: "".into(), ..Default::default() } }
-            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(EmptyPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(EmptyPlugin { meta: PluginMetadata { id: "empty".into(), ..Default::default() } });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        // Should not panic — empty handlers vec should be handled gracefully
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -444,94 +430,62 @@ mod tests {
     async fn t2_31_mixed_rule_and_no_rule_handlers() -> anyhow::Result<()> {
         let call_count = Arc::new(AtomicUsize::new(0));
 
-        struct MixedPlugin(Arc<AtomicUsize>);
+        struct MixedPlugin {
+            meta: PluginMetadata,
+            handlers: Vec<MessageHandler>,
+        }
         impl Plugin for MixedPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "mixed".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let c = Arc::clone(&self.0);
-                vec![
-                    // Handler with rule matching /ping — should execute
-                    MessageHandler {
-                        func: Arc::new({
-                            let count: Arc<AtomicUsize> = Arc::clone(&c);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
-                                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: Some(is_fullmatch(["/ping"])),
-                    },
-                    // Handler with rule matching /pong — should NOT execute for /ping
-                    MessageHandler {
-                        func: Arc::new({
-                            let count: Arc<AtomicUsize> = Arc::clone(&c);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
-                                Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: Some(is_fullmatch(["/pong"])),
-                    },
-                    // Handler with no rule — should always execute
-                    MessageHandler {
-                        func: Arc::new({
-                            let count: Arc<AtomicUsize> = Arc::clone(&c);
-                            move |_, _, _| {
-                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
-                                Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); })
-                            }
-                        }),
-                        rule: None,
-                    },
-                ]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(MixedPlugin(Arc::clone(&call_count)));
+        let c = Arc::clone(&call_count);
+        let plugin: Arc<dyn Plugin> = Arc::new(MixedPlugin {
+            meta: PluginMetadata { id: "mixed".into(), ..Default::default() },
+            handlers: vec![
+                MessageHandler::new("ping_rule", Some(is_fullmatch(["/ping"])), Arc::new({
+                    let count = Arc::clone(&c);
+                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                })),
+                MessageHandler::new("pong_rule", Some(is_fullmatch(["/pong"])), Arc::new({
+                    let count = Arc::clone(&c);
+                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); Ok(()) }) }
+                })),
+                MessageHandler::new("catchall", None, Arc::new({
+                    let count = Arc::clone(&c);
+                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); Ok(()) }) }
+                })),
+            ],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        // Only handler 1 (/ping rule match = +1) and handler 3 (no rule = +100) should fire
         assert_eq!(call_count.load(Ordering::SeqCst), 101, "only matching rule and no-rule handlers should execute");
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_32_handler_with_plugin_name() -> anyhow::Result<()> {
-        // Verify that plugin with a non-empty name works correctly
-        struct NamedPlugin;
+        struct NamedPlugin { meta: PluginMetadata, handlers: Vec<MessageHandler> }
         impl Plugin for NamedPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "named".into(), name: "TestName".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler { func: Arc::new(|_, _, _| Box::pin(async {})), rule: None }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(NamedPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(NamedPlugin {
+            meta: PluginMetadata { id: "named".into(), name: "TestName".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -540,35 +494,26 @@ mod tests {
     async fn t2_33_multiple_events_to_same_actor() -> anyhow::Result<()> {
         let counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
-        struct CountPlugin(Arc<AtomicUsize>);
+        struct CountPlugin { meta: PluginMetadata, handlers: Vec<MessageHandler> }
         impl Plugin for CountPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata { id: "count".into(), name: "".into(), description: "".into(), ..Default::default() }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                let c: Arc<AtomicUsize> = Arc::clone(&self.0);
-                vec![MessageHandler {
-                    func: Arc::new(move |_, _, _| {
-                        let c2: Arc<AtomicUsize> = Arc::clone(&c);
-                        Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
-                    }),
-                    rule: None,
-                }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(CountPlugin(Arc::clone(&counter)));
+        let c = Arc::clone(&counter);
+        let plugin: Arc<dyn Plugin> = Arc::new(CountPlugin {
+            meta: PluginMetadata { id: "count".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("count", None, Arc::new(move |_, _, _| {
+                let c2 = Arc::clone(&c);
+                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) })
+            }))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        // Send 3 events
         for _ in 0..3 {
             let mut event = make_event("test");
             event.set_callback(|_| Box::pin(async {}));
-            let _ = actor_ref.tell(HandleEvent {
-                event,
-                adapter: Arc::new(MockAdapter),
-                ctx: Arc::new(Ctx::new()),
-            }).await;
+            let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -578,33 +523,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_34_plugin_with_custom_metadata_name() -> anyhow::Result<()> {
-        struct CustomMetaPlugin;
+        struct CustomMetaPlugin { meta: PluginMetadata, handlers: Vec<MessageHandler> }
         impl Plugin for CustomMetaPlugin {
-            fn metadata(&self) -> PluginMetadata {
-                PluginMetadata {
-                    id: "custom_meta".into(),
-                    name: "元数据测试".into(),
-                    description: "".into(),
-                    ..Default::default()
-                }
-            }
-            fn message_handlers(&self) -> Vec<MessageHandler> {
-                vec![MessageHandler { func: Arc::new(|_, _, _| Box::pin(async {})), rule: None }]
-            }
+            fn metadata(&self) -> &PluginMetadata { &self.meta }
+            fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let plugin: Arc<dyn Plugin> = Arc::new(CustomMetaPlugin);
+        let plugin: Arc<dyn Plugin> = Arc::new(CustomMetaPlugin {
+            meta: PluginMetadata { id: "custom_meta".into(), name: "元数据测试".into(), ..Default::default() },
+            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+        });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent {
-            event,
-            adapter: Arc::new(MockAdapter),
-            ctx: Arc::new(Ctx::new()),
-        }).await;
-
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }

@@ -313,6 +313,21 @@ impl FishWebSocketAdapter {
         ))
     }
 
+    /// Run the adapter event loop, taking ownership of the Arc directly.
+    /// Unlike run(&self), this avoids an internal clone by accepting self: Arc<Self>.
+    pub async fn run_arc(self: Arc<Self>) -> Result<()> {
+        self.ensure_auth().await?;
+        loop {
+            tracing::info!("Starting adapter. Connecting...");
+            if let Err(e) = self.connect_and_run().await {
+                tracing::error!("Connection error: {}, reconnecting in 5s...", e);
+            } else {
+                tracing::info!("Connection closed cleanly, reconnecting in 5s...");
+            }
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     /// Ensure we have valid authentication before connecting.
     async fn ensure_auth(&self) -> Result<()> {
         let cookies: HashMap<String, String> = self.api.auth().get_cookies().await;
