@@ -3,14 +3,14 @@ use crate::adapter::BaseAdapter;
 use crate::model::MessageEvent;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use async_trait::async_trait;
 
 pub mod echo;
 
+#[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    fn on_message(&self, event: &MessageEvent, adapter: Arc<dyn BaseAdapter>);
+    async fn on_message(&self, event: &MessageEvent, adapter: Arc<dyn BaseAdapter>);
 }
-
-type PluginCallback = Box<dyn Fn(&MessageEvent, Arc<dyn BaseAdapter>) + Send + Sync>;
 
 static REGISTRY: Lazy<Mutex<Vec<Box<dyn Plugin>>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
@@ -19,9 +19,9 @@ pub fn register_plugin<P: Plugin + 'static>(plugin: P) {
     plugins.push(Box::new(plugin));
 }
 
-pub fn dispatch_event(event: &MessageEvent, adapter: Arc<dyn BaseAdapter>) {
+pub async fn dispatch_event(event: &MessageEvent, adapter: Arc<dyn BaseAdapter>) {
     let plugins = REGISTRY.lock().unwrap();
     for plugin in plugins.iter() {
-        plugin.on_message(event, adapter.clone());
+        plugin.on_message(event, adapter.clone()).await;
     }
 }
