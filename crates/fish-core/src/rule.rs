@@ -83,7 +83,7 @@ pub fn is_fullmatch(msg: impl Into<MatchList>) -> Rule {
     let candidates = msg.into().0;
     Rule::new(move |event| {
         let text = event.plain_text().trim().to_string();
-        candidates.iter().any(|c| text == *c)
+        candidates.contains(&text)
     })
 }
 
@@ -220,5 +220,23 @@ mod tests {
         assert!(r.check(&make_event("/admin delete user")));
         assert!(!r.check(&make_event("/admin view")));
         assert!(!r.check(&make_event("/user delete")));
+    }
+
+    #[test]
+    fn t1_38_rule_debug_fmt() -> anyhow::Result<()> {
+        let rule = Rule::new(|_: &MessageEvent| true);
+        let debug = format!("{:?}", rule);
+        assert!(debug.contains("Rule"));
+        Ok(())
+    }
+
+    #[test]
+    fn t1_39_is_regex_case_insensitive() -> anyhow::Result<()> {
+        let r = is_regex(r"(?i)hello");
+        assert!(r.check(&make_event("Hello")));
+        assert!(r.check(&make_event("HELLO")));
+        assert!(r.check(&make_event("hello")));
+        assert!(!r.check(&make_event("world")));
+        Ok(())
     }
 }

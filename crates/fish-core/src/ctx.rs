@@ -129,4 +129,52 @@ mod tests {
         assert_eq!(ctx.get::<Config>().ok_or_else(|| anyhow::anyhow!("Config"))?.0, "prod");
         Ok(())
     }
+
+    #[test]
+    fn t1_34_concurrent_insert_get() -> anyhow::Result<()> {
+        use std::thread;
+        let ctx = Arc::new(Ctx::new());
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let ctx_clone = Arc::clone(&ctx);
+            handles.push(thread::spawn(move || {
+                ctx_clone.insert(DbPool(i));
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+
+        let val = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        assert!(val.0 < 10);
+        Ok(())
+    }
+
+    #[test]
+    fn t1_35_remove_nonexistent() -> anyhow::Result<()> {
+        let ctx = Ctx::new();
+        let result: Option<Arc<DbPool>> = ctx.remove::<DbPool>();
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn t1_36_insert_arc_overwrites() -> anyhow::Result<()> {
+        let ctx = Ctx::new();
+        ctx.insert(DbPool(1));
+        ctx.insert_arc(Arc::new(DbPool(99)));
+
+        let pool = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        assert_eq!(pool.0, 99);
+        Ok(())
+    }
+
+    #[test]
+    fn t1_37_default_is_empty() -> anyhow::Result<()> {
+        let ctx = Ctx::default();
+        let pool: Option<Arc<DbPool>> = ctx.get::<DbPool>();
+        assert!(pool.is_none());
+        Ok(())
+    }
 }

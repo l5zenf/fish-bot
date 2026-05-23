@@ -34,4 +34,16 @@ mod tests {
         // SAFETY: test-only cleanup
         unsafe { std::env::remove_var("RUST_LOG"); }
     }
+
+    #[test]
+    fn t4_6_init_with_custom_level() -> anyhow::Result<()> {
+        // SAFETY: test-only, single-threaded
+        unsafe { std::env::set_var("RUST_LOG", "debug"); }
+        let _ = std::panic::catch_unwind(|| {
+            super::init("debug");
+        });
+        // SAFETY: test-only cleanup
+        unsafe { std::env::remove_var("RUST_LOG"); }
+        Ok(())
+    }
 }

@@ -85,10 +85,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use fish_adapter::adapter::BaseAdapter;
-    use fish_core::error::Result;
+    use fish_core::error::{AppError, Result};
     use fish_core::rule::{is_fullmatch};
     use fish_plugin::plugin::{MessageHandler, Plugin, PluginMetadata};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use kameo::actor::Spawn;
 
     struct MockAdapter;
@@ -220,5 +220,85 @@ mod tests {
 
         // Should not panic with no plugins
         let _ = bot_ref.tell(DispatchEvent { event }).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t4_7_dispatch_reply_send_error() -> anyhow::Result<()> {
+        struct ErrorAdapter;
+        #[async_trait]
+        impl BaseAdapter for ErrorAdapter {
+            fn set_callback(&self, _: Box<dyn Fn(MessageEvent) + Send + Sync>) {}
+            async fn send(&self, _: &str, _: &MessageChain, _: Option<&str>) -> Result<()> {
+                Err(AppError::http("simulated error"))
+            }
+            async fn run(&self) -> Result<()> { Ok(()) }
+        }
+
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(ErrorAdapter);
+        let ctx = Arc::new(Ctx::new());
+
+        struct ReplyPlugin;
+        impl Plugin for ReplyPlugin {
+            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "reply".into(), name: "".into(), description: "".into(), ..Default::default() } }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                vec![MessageHandler {
+                    func: Arc::new(|event, _, _| {
+                        Box::pin(async move {
+                            let _ = event.reply(MessageSegment::text("reply")).await;
+                        })
+                    }),
+                    rule: None,
+                }]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin);
+        let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+
+        let mut event = make_event("/test");
+        event.set_callback(|_| Box::pin(async {}));
+
+        // Should not panic when adapter.send returns Err
+        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t4_8_dispatch_rule_not_matching() -> anyhow::Result<()> {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        struct SelectivePlugin(Arc<AtomicBool>);
+        impl Plugin for SelectivePlugin {
+            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "selective".into(), name: "".into(), description: "".into(), ..Default::default() } }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                let flag = Arc::clone(&self.0);
+                vec![MessageHandler {
+                    func: Arc::new(move |_, _, _| {
+                        let f = Arc::clone(&flag);
+                        Box::pin(async move { f.store(true, Ordering::SeqCst); })
+                    }),
+                    rule: Some(is_fullmatch(["/run"])),
+                }]
+            }
+        }
+
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
+        let ctx = Arc::new(Ctx::new());
+
+        let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin(called_clone));
+        let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+
+        let mut event = make_event("/skip");
+        event.set_callback(|_| Box::pin(async {}));
+
+        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        assert!(!called.load(Ordering::SeqCst), "handler should not be called when rule doesn't match");
+        Ok(())
     }
 }

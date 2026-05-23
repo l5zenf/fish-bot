@@ -91,7 +91,7 @@ impl FishAPI {
             .unwrap_or_default()
             .as_millis();
         let t_str = t.to_string();
-        let data_val = if data.is_null() || data.as_object().map_or(true, |o| o.is_empty()) {
+        let data_val = if data.is_null() || data.as_object().is_none_or(|o| o.is_empty()) {
             "{}".to_string()
         } else {
             serde_json::to_string(data)?
@@ -152,11 +152,10 @@ impl FishAPI {
         let json: Value = response.json().await.map_err(http_err)?;
 
         // Check for error ret
-        if let Some(ret) = json.get("ret").and_then(|v| v.as_array()) {
-            if ret.iter().all(|r| !r.as_str().map_or(false, |s| s.contains("SUCCESS"))) {
+        if let Some(ret) = json.get("ret").and_then(|v| v.as_array())
+            && ret.iter().all(|r| !r.as_str().is_some_and(|s| s.contains("SUCCESS"))) {
                 tracing::warn!("MTOP API error: {:?}", ret);
             }
-        }
 
         Ok(json)
     }
@@ -379,9 +378,9 @@ impl FishAPI {
             }
         };
 
-        let t = data.get("t").map(|v| as_string(v)).unwrap_or_default();
-        let ck = data.get("ck").map(|v| as_string(v)).unwrap_or_default();
-        let code_content = data.get("codeContent").map(|v| as_string(v)).unwrap_or_default();
+        let t = data.get("t").map(&as_string).unwrap_or_default();
+        let ck = data.get("ck").map(&as_string).unwrap_or_default();
+        let code_content = data.get("codeContent").map(as_string).unwrap_or_default();
 
         if code_content.is_empty() {
             tracing::error!("QR code content is empty");
@@ -426,14 +425,13 @@ impl FishAPI {
             .unwrap_or_default();
 
         // Check for error/redirect (risk control)
-        if let Some(redirect) = data.get("iframeRedirect").and_then(|v| v.as_str()) {
-            if !redirect.is_empty() {
+        if let Some(redirect) = data.get("iframeRedirect").and_then(|v| v.as_str())
+            && !redirect.is_empty() {
                 let mut result = HashMap::new();
                 result.insert("status".to_string(), "ERROR".to_string());
                 result.insert("redirect_url".to_string(), redirect.to_string());
                 return Ok(result);
             }
-        }
 
         let status = data
             .get("qrCodeStatus")

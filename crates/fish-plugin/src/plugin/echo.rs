@@ -132,4 +132,60 @@ mod tests {
         assert!(!rule.check(&no_match));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn t2_24_handler_empty_input() -> anyhow::Result<()> {
+        let plugin = EchoPlugin::new();
+        let handlers = plugin.message_handlers();
+        let handler = &handlers[0];
+
+        let captured = Arc::new(parking_lot::Mutex::new(String::new()));
+        let mut event = MessageEvent::new(
+            "cid".into(), "uid".into(), "name".into(),
+            MessageChain::from(""),
+            serde_json::json!({}),
+        );
+
+        let captured_clone = Arc::clone(&captured);
+        event.set_callback(move |seg: MessageSegment| {
+            let c = Arc::clone(&captured_clone);
+            Box::pin(async move { *c.lock() = seg.summary(); })
+        });
+
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
+        let ctx = Arc::new(Ctx::new());
+
+        (handler.func)(event, adapter, ctx).await;
+
+        assert_eq!(*captured.lock(), "Echo: ");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t2_25_handler_whitespace_input() -> anyhow::Result<()> {
+        let plugin = EchoPlugin::new();
+        let handlers = plugin.message_handlers();
+        let handler = &handlers[0];
+
+        let captured = Arc::new(parking_lot::Mutex::new(String::new()));
+        let mut event = MessageEvent::new(
+            "cid".into(), "uid".into(), "name".into(),
+            MessageChain::from("  hello  "),
+            serde_json::json!({}),
+        );
+
+        let captured_clone = Arc::clone(&captured);
+        event.set_callback(move |seg: MessageSegment| {
+            let c = Arc::clone(&captured_clone);
+            Box::pin(async move { *c.lock() = seg.summary(); })
+        });
+
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
+        let ctx = Arc::new(Ctx::new());
+
+        (handler.func)(event, adapter, ctx).await;
+
+        assert_eq!(*captured.lock(), "Echo: hello");
+        Ok(())
+    }
 }

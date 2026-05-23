@@ -39,6 +39,12 @@ pub struct FishWebSocketAdapter {
     ws_writer: RwLock<Option<WsWriter>>,
 }
 
+impl Default for FishWebSocketAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FishWebSocketAdapter {
     pub fn new() -> Self {
         let auth = AuthManager::new();

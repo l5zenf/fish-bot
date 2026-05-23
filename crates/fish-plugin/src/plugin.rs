@@ -153,4 +153,50 @@ mod tests {
         let count = plugins.iter().filter(|p| p.metadata().id == "dup").count();
         assert_eq!(count, 2, "duplicate registration should be allowed at registry level");
     }
+
+    #[test]
+    fn t2_18_default_event_handlers() -> anyhow::Result<()> {
+        struct EmptyPlugin;
+        impl Plugin for EmptyPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata::default()
+            }
+        }
+
+        let plugin = EmptyPlugin;
+        let handlers = plugin.event_handlers();
+        assert!(handlers.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn t2_19_default_message_handlers() -> anyhow::Result<()> {
+        struct EmptyPlugin;
+        impl Plugin for EmptyPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata::default()
+            }
+        }
+
+        let plugin = EmptyPlugin;
+        let handlers = plugin.message_handlers();
+        assert!(handlers.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn t2_20_event_handler_construct() -> anyhow::Result<()> {
+        let handler_with_rule = EventHandler {
+            func: Arc::new(|_, _, _| Box::pin(async {})),
+            rule: Some(Rule::new(|_| true)),
+        };
+        assert!(handler_with_rule.rule.is_some());
+
+        let handler_no_rule = EventHandler {
+            func: Arc::new(|_, _, _| Box::pin(async {})),
+            rule: None,
+        };
+        assert!(handler_no_rule.rule.is_none());
+        Ok(())
+    }
 }

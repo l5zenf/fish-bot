@@ -12,6 +12,12 @@ pub struct AuthManager {
     data_dir: PathBuf,
 }
 
+impl Default for AuthManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthManager {
     pub fn new() -> Self {
         let device_id = crate::fish::sign::generate_device_id("");
@@ -19,7 +25,7 @@ impl AuthManager {
         // Try loading from file first, then env var
         let data_dir = Self::resolve_data_dir();
         let cookies = Self::load_cookies_from_file(&data_dir)
-            .or_else(|| Self::load_cookies_from_env())
+            .or_else(Self::load_cookies_from_env)
             .unwrap_or_default();
 
         Self {
@@ -71,14 +77,12 @@ impl AuthManager {
     /// Save cookies to the local auth file.
     pub async fn save_cookies_to_file(&self) {
         let path = self.auth_file_path();
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+                && let Err(e) = std::fs::create_dir_all(parent) {
                     tracing::error!("Failed to create data directory {}: {}", parent.display(), e);
                     return;
                 }
-            }
-        }
         let cookies = self.cookies.lock().await;
         match serde_json::to_string_pretty(&*cookies) {
             Ok(json) => match std::fs::write(&path, &json) {
@@ -355,5 +359,36 @@ mod tests {
     async fn t3_37_from_local_or_qr_login() {
         let result = AuthManager::from_local_or_qr_login().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn t3_38_save_cookies_creates_dir() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+        let dir = tempdir()?;
+        let nested = dir.path().join("nested").join("subdir");
+
+        let auth = AuthManager {
+            client: reqwest::Client::new(),
+            cookies: Arc::new(Mutex::new([("unb".into(), "test".into())].into())),
+            device_id: "dev".into(),
+            data_dir: nested.clone(),
+        };
+
+        auth.save_cookies_to_file().await;
+        assert!(nested.exists(), "data directory should be created");
+        assert!(nested.join("fish_auth.json").exists(), "auth file should exist");
+
+        let content = std::fs::read_to_string(nested.join("fish_auth.json"))?;
+        let parsed: HashMap<String, String> = serde_json::from_str(&content)?;
+        assert_eq!(parsed.get("unb"), Some(&"test".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_39_resolve_data_dir_default() -> anyhow::Result<()> {
+        unsafe { std::env::remove_var("FISH_DATA_DIR"); }
+        let dir = AuthManager::resolve_data_dir();
+        assert_eq!(dir, PathBuf::from("data"));
+        Ok(())
     }
 }

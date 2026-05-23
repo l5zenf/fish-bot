@@ -124,4 +124,34 @@ mod tests {
         assert_eq!(mgr.plugins["test_dupe_id"].metadata().name, "X",
             "first registered plugin should be the one loaded");
     }
+
+    #[test]
+    fn t2_26_load_empty_registry() -> anyhow::Result<()> {
+        // Use distinct IDs to avoid interference from shared global registry
+        let mgr = PluginManager::new();
+        // Don't call load_all_plugins since it touches the shared registry
+        assert!(mgr.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn t2_27_len_is_empty() -> anyhow::Result<()> {
+        struct DummyPlugin;
+        impl Plugin for DummyPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "len_test".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+
+        let empty_mgr = PluginManager::new();
+        assert_eq!(empty_mgr.len(), 0);
+        assert!(empty_mgr.is_empty());
+
+        let mut mgr = PluginManager::new();
+        mgr.plugins.insert("len_test".into(), Arc::new(DummyPlugin));
+        assert_eq!(mgr.len(), 1);
+        assert!(!mgr.is_empty());
+        Ok(())
+    }
 }

@@ -157,6 +157,19 @@ pub fn decode_message(payload: &Value) -> Result<MessageSegment> {
     }
 }
 
+/// Parse raw fish protocol body into a Vec<MessageSegment>.
+pub fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
+    // Check if this is a structured content object with contentType
+    if payload.get("contentType").is_some() {
+        return Ok(vec![decode_message(payload)?]);
+    }
+    // Check if array
+    if let Some(arr) = payload.as_array() {
+        return arr.iter().map(decode_message).collect();
+    }
+    Ok(vec![decode_message(payload)?])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,17 +418,23 @@ mod tests {
         }
         Ok(())
     }
-}
 
-/// Parse raw fish protocol body into a Vec<MessageSegment>.
-pub fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
-    // Check if this is a structured content object with contentType
-    if payload.get("contentType").is_some() {
-        return Ok(vec![decode_message(payload)?]);
+    #[test]
+    fn t3_40_decode_empty_custom_data() -> anyhow::Result<()> {
+        let payload = make_ct_payload(101, serde_json::json!({
+            "custom": {"type": 2, "data": ""}
+        }));
+        let result = decode_message(&payload);
+        assert!(result.is_err(), "empty base64 custom data should produce an error");
+        Ok(())
     }
-    // Check if array
-    if let Some(arr) = payload.as_array() {
-        return arr.iter().map(|v| decode_message(v)).collect();
+
+    #[test]
+    fn t3_41_decode_content_empty_object() -> anyhow::Result<()> {
+        let payload = serde_json::json!({});
+        let segs = decode_content(&payload)?;
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], MessageSegment::CustomNode { desc, .. } if desc == "未知消息"));
+        Ok(())
     }
-    Ok(vec![decode_message(payload)?])
 }

@@ -100,15 +100,14 @@ mod tests {
     #[test]
     fn t1_36_from_serde_json_error() {
         let result: std::result::Result<(), AppError> =
-            Err(serde_json::from_str::<()>("invalid").unwrap_err()).map_err(Into::into);
+            Err(Into::into(serde_json::from_str::<()>("invalid").unwrap_err()));
         assert!(matches!(result, Err(AppError::Json { .. })));
     }
 
     #[test]
     fn t1_37_from_base64_error() {
         let result: std::result::Result<(), AppError> =
-            Err(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err())
-                .map_err(Into::into);
+            Err(Into::into(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err()));
         assert!(matches!(result, Err(AppError::Base64 { .. })));
     }
 
