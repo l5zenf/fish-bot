@@ -45,6 +45,7 @@ qrcode = "0.12"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
+md5 = "0.7"
 
 # --- internal ---
 fish-core = { path = "crates/fish-core" }

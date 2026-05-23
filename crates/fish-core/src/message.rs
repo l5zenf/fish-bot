@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// All message segment types (core), matching Python message.py
+/// All message segment types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MessageSegment {
@@ -67,7 +67,7 @@ impl MessageSegment {
     }
 }
 
-/// Core message chain, matching Python MessageChain
+/// Core message chain.
 #[derive(Debug, Clone, Default)]
 pub struct MessageChain {
     segments: Vec<MessageSegment>,

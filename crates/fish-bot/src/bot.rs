@@ -10,7 +10,6 @@ use fish_core::message::{MessageChain, MessageSegment};
 use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
 
 /// Bot actor — receives MessageEvents and fans out to all PluginActors.
-/// Matching Python bot.py Bot class, powered by kameo actor runtime.
 #[derive(Actor)]
 pub struct Bot {
     adapter: Arc<dyn BaseAdapter>,

@@ -10,7 +10,7 @@ use fish_core::rule::Rule;
 pub mod actor;
 pub mod echo;
 
-/// Plugin metadata, matching Python plugin.py PluginMetadata.
+/// Plugin metadata.
 #[derive(Debug, Clone)]
 pub struct PluginMetadata {
     pub id: String,
@@ -32,7 +32,7 @@ impl Default for PluginMetadata {
     }
 }
 
-/// A message handler registered by a plugin, matching Python's message handler dict.
+/// A message handler registered by a plugin.
 pub struct MessageHandler {
     pub func: Arc<
         dyn Fn(MessageEvent, Arc<dyn BaseAdapter>, Arc<Ctx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -42,7 +42,7 @@ pub struct MessageHandler {
     pub rule: Option<Rule>,
 }
 
-/// An event handler registered by a plugin, matching Python's event handler dict.
+/// An event handler registered by a plugin.
 /// Handles non-message events (notices, requests, meta events).
 pub struct EventHandler {
     pub func: Arc<
@@ -53,7 +53,7 @@ pub struct EventHandler {
     pub rule: Option<Rule>,
 }
 
-/// Plugin trait, matching Python plugin.py Plugin class.
+/// Plugin trait.
 pub trait Plugin: Send + Sync + 'static {
     fn metadata(&self) -> PluginMetadata;
 
@@ -63,13 +63,12 @@ pub trait Plugin: Send + Sync + 'static {
     }
 
     /// Event handlers keyed by event type (e.g. "notice", "request", "meta_event").
-    /// Matches Python Plugin.event_handlers: dict[str, list[dict]].
     fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
         HashMap::new()
     }
 }
 
-// ---- Global registry, matching Python PluginManager pattern ----
+// ---- Global registry ----
 
 static REGISTRY: std::sync::LazyLock<RwLock<Vec<Arc<dyn Plugin>>>> =
     std::sync::LazyLock::new(|| RwLock::new(Vec::new()));

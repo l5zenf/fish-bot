@@ -5,7 +5,6 @@ use fish_core::error::Result;
 use fish_core::message::MessageSegment;
 
 /// Encode a MessageSegment to fish protocol JSON Value, returning (payload, content_type).
-/// Matches Python adapters/fish/message.py auto_encode / FishPayloadNode.encode.
 pub fn encode_message(msg: &MessageSegment) -> Result<(Value, i64)> {
     match msg {
         MessageSegment::Text { text } => Ok((
@@ -73,7 +72,6 @@ pub fn encode_chain(chain: &[MessageSegment]) -> Result<(Value, i64)> {
 }
 
 /// Decode a fish protocol JSON payload into a MessageSegment.
-/// Matches Python adapters/fish/message.py Content.to_message_chain / FishPayloadNode.decode.
 pub fn decode_message(payload: &Value) -> Result<MessageSegment> {
     let ct = payload.get("contentType").and_then(|v| v.as_i64()).unwrap_or(0);
     match ct {

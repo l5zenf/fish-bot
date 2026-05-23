@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 type ReplyFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Message event context, matching Python event.py MessageEvent
+/// Message event context.
 #[derive(Clone)]
 pub struct MessageEvent {
     pub cid: String,

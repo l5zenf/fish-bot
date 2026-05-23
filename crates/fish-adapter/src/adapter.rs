@@ -4,10 +4,10 @@ use fish_core::message::MessageChain;
 use async_trait::async_trait;
 
 
-/// BaseAPI trait — marker trait for API clients, matching Python adapter.py BaseAPI.
+/// BaseAPI trait — marker trait for API clients.
 pub trait BaseAPI: Send + Sync {}
 
-/// Base adapter trait, matching Python adapter.py BaseAdapter.
+/// Base adapter trait.
 #[async_trait]
 pub trait BaseAdapter: Send + Sync {
     /// Set the callback invoked when a MessageEvent is received.

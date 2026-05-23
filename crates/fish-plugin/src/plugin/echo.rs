@@ -7,7 +7,7 @@ use fish_core::message::MessageSegment;
 use crate::plugin::{MessageHandler, Plugin, PluginMetadata};
 use fish_core::rule::is_fullmatch;
 
-/// Echo plugin matching Python builtin_plugins/echo.py.
+/// Echo plugin — replies with the received message content.
 pub struct EchoPlugin;
 
 impl EchoPlugin {

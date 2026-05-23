@@ -32,7 +32,7 @@ type WsWriter = futures::stream::SplitSink<
 >;
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-/// Fish WebSocket adapter, matching Python adapters/fish/__init__.py FishWebSocketAdapter.
+/// Fish WebSocket adapter.
 pub struct FishWebSocketAdapter {
     callback: Mutex<Option<Box<dyn Fn(MessageEvent) + Send + Sync>>>,
     api: FishAPI,
@@ -167,7 +167,7 @@ impl FishWebSocketAdapter {
         Ok(())
     }
 
-    /// Handle a single raw WS message frame, matching Python _handle_raw_message.
+    /// Handle a single raw WS message frame.
     async fn handle_raw_message(self: &Arc<Self>, text: &str) -> Result<()> {
         let msg: Value = serde_json::from_str(text)?;
 
@@ -239,7 +239,7 @@ impl FishWebSocketAdapter {
         Ok(())
     }
 
-    /// Parse a decrypted payload into a MessageEvent, matching Python _handle_raw_message parsing.
+    /// Parse a decrypted payload into a MessageEvent.
     async fn parse_event(self: &Arc<Self>, payload: &Value) -> Option<MessageEvent> {
         let body = payload.get("1").or_else(|| payload.get("body")).or(Some(payload))?;
 

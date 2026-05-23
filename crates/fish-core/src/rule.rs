@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use crate::event::MessageEvent;
 
-/// Rule system matching Python rule.py Rule class.
-/// A Rule is a composable predicate over MessageEvent.
+/// Rule system — a composable predicate over MessageEvent.
 #[derive(Clone)]
 pub struct Rule {
     checker: Arc<dyn Fn(&MessageEvent) -> bool + Send + Sync>,
@@ -17,7 +16,7 @@ impl Rule {
         }
     }
 
-    /// Create a Rule from a plain function (matching Python Rule(callable)).
+    /// Create a Rule from a plain function.
     pub fn from_fn(f: impl Fn(&MessageEvent) -> bool + Send + Sync + 'static) -> Self {
         Self::new(f)
     }
@@ -26,14 +25,14 @@ impl Rule {
         (self.checker)(event)
     }
 
-    /// Combine two rules with logical AND, matching Python Rule.__and__.
+    /// Combine two rules with logical AND.
     pub fn and(&self, other: &Rule) -> Rule {
         let a = self.checker.clone();
         let b = other.checker.clone();
         Rule::new(move |event| a(event) && b(event))
     }
 
-    /// Combine two rules with logical OR, matching Python Rule.__or__.
+    /// Combine two rules with logical OR.
     pub fn or(&self, other: &Rule) -> Rule {
         let a = self.checker.clone();
         let b = other.checker.clone();
@@ -41,11 +40,9 @@ impl Rule {
     }
 }
 
-// ---- Rule constructors, matching Python rule.py helpers ----
-// Python accepts Union[str, Tuple[str, ...]]; Rust accepts single &str or Vec<&str> via MatchList.
+// ---- Rule constructors ----
 
 /// A list of match patterns — supports single string or multiple strings.
-/// Matching Python rule.py's Union[str, Tuple[str, ...]] parameter convention.
 pub struct MatchList(Vec<String>);
 
 impl From<&str> for MatchList {

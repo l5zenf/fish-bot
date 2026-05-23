@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::plugin::Plugin;
 
-/// Plugin manager matching Python loader.py PluginManager.
+/// Plugin manager.
 pub struct PluginManager {
     pub plugins: HashMap<String, Arc<dyn Plugin>>,
 }
@@ -15,8 +15,7 @@ impl PluginManager {
         }
     }
 
-    /// Load all plugins — in Rust this discovers globally registered plugins.
-    /// Matches Python PluginManager.load_all_plugins().
+    /// Load all plugins — discovers globally registered plugins.
     pub fn load_all_plugins(&mut self) {
         let registered = crate::plugin::registered_plugins();
         for plugin in registered {
