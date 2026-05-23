@@ -19,10 +19,6 @@ impl PluginActor {
     pub fn new(plugin: Arc<dyn Plugin>) -> Self {
         Self { plugin }
     }
-
-    pub fn plugin_id(&self) -> String {
-        self.plugin.metadata().id
-    }
 }
 
 // ---- Messages ----

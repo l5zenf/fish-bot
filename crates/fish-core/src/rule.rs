@@ -101,9 +101,12 @@ pub fn is_keywords(keyword: impl Into<MatchList>) -> Rule {
 
 /// Match messages that match the given regex pattern.
 /// For flags, embed them in the pattern string using Rust regex syntax, e.g. "(?i)pattern".
+/// Returns a Rule that never matches if the pattern is invalid.
 pub fn is_regex(pattern: &str) -> Rule {
-    let compiled = Regex::new(pattern).expect("Invalid regex pattern");
-    Rule::new(move |event| compiled.is_match(&event.plain_text()))
+    match Regex::new(pattern) {
+        Ok(compiled) => Rule::new(move |event| compiled.is_match(&event.plain_text())),
+        Err(_) => Rule::new(|_| false),
+    }
 }
 
 impl std::fmt::Debug for Rule {

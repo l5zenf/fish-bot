@@ -8,7 +8,8 @@ use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep, Duration};
@@ -57,10 +58,10 @@ impl FishWebSocketAdapter {
                 let text = serde_json::to_string(msg)?;
                 w.send(WsMessage::Text(text))
                     .await
-                    .map_err(AppError::Ws)?;
+                    .map_err(|e| AppError::ws(e.to_string()))?;
                 Ok(())
             }
-            None => Err(AppError::Protocol("WebSocket not connected".into())),
+            None => Err(AppError::protocol("WebSocket not connected")),
         }
     }
 
@@ -70,7 +71,7 @@ impl FishWebSocketAdapter {
         tracing::info!("Connecting to {}", url);
 
         use tokio_tungstenite::connect_async;
-        let (ws_stream, _) = connect_async(url).await?;
+        let (ws_stream, _) = connect_async(url).await.map_err(|e| AppError::ws(e.to_string()))?;
         let (writer, reader) = ws_stream.split();
 
         {
@@ -102,7 +103,7 @@ impl FishWebSocketAdapter {
         // Step 3: Send sync status ackDiff
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
         let sync_msg = serde_json::json!({
             "lwp": "/r/SyncStatus/ackDiff",
@@ -229,7 +230,7 @@ impl FishWebSocketAdapter {
                 );
 
                 // Invoke callback (set by Bot)
-                if let Some(ref cb) = *self.callback.lock().unwrap() {
+                if let Some(ref cb) = *self.callback.lock() {
                     cb(event);
                 }
             }
@@ -350,8 +351,8 @@ impl FishWebSocketAdapter {
                             "Risk control triggered! Please complete CAPTCHA in browser: {}",
                             url
                         );
-                        return Err(AppError::Auth(
-                            "Risk control triggered, manual CAPTCHA required".into(),
+                        return Err(AppError::auth(
+                            "Risk control triggered, manual CAPTCHA required",
                         ));
                     } else {
                         tracing::warn!("Token invalid, trying to refresh...");
@@ -394,11 +395,11 @@ impl FishWebSocketAdapter {
             .api
             .qrcode_gen()
             .await?
-            .ok_or_else(|| AppError::Auth("Failed to generate QR code".into()))?;
+            .ok_or_else(|| AppError::auth("Failed to generate QR code"))?;
 
         let content = qr_data
             .get("content")
-            .ok_or_else(|| AppError::Auth("QR code content missing".into()))?;
+            .ok_or_else(|| AppError::auth("QR code content missing"))?;
 
         match qrcode::QrCode::new(content.as_bytes()) {
             Ok(code) => {
@@ -444,11 +445,11 @@ impl FishWebSocketAdapter {
                 }
                 "EXPIRED" => {
                     tracing::warn!("QR code expired");
-                    return Err(AppError::Auth("QR code expired, please restart".into()));
+                    return Err(AppError::auth("QR code expired, please restart"));
                 }
                 "CANCELED" => {
                     tracing::info!("User cancelled login on phone");
-                    return Err(AppError::Auth("Login cancelled".into()));
+                    return Err(AppError::auth("Login cancelled"));
                 }
                 "ERROR" => {
                     let redirect = result.get("redirect_url").cloned().unwrap_or_default();
@@ -456,7 +457,7 @@ impl FishWebSocketAdapter {
                         "Account is risk-controlled. Please visit URL to verify via SMS: {}",
                         redirect
                     );
-                    return Err(AppError::Auth(format!(
+                    return Err(AppError::auth(format!(
                         "Risk control: verify at {}",
                         redirect
                     )));
@@ -482,7 +483,7 @@ impl Clone for FishWebSocketAdapter {
 #[async_trait]
 impl BaseAdapter for FishWebSocketAdapter {
     fn set_callback(&self, cb: Box<dyn Fn(MessageEvent) + Send + Sync>) {
-        let mut guard = self.callback.lock().unwrap();
+        let mut guard = self.callback.lock();
         *guard = Some(cb);
     }
 

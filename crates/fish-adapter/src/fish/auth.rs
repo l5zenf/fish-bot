@@ -143,7 +143,7 @@ impl AuthManager {
     /// Perform QR code login — returns the cookies dict.
     pub async fn qrcode_login(&mut self) -> Result<HashMap<String, String>> {
         // QR login is now orchestrated at the adapter level
-        Err(AppError::Auth("QR code login not implemented".into()))
+        Err(AppError::auth("QR code login not implemented"))
     }
 
     /// Ensure we have valid auth, logging in if necessary.

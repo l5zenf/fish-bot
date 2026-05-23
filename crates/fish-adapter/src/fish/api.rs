@@ -1,7 +1,10 @@
 use fish_core::error::{AppError, Result};
+
+fn http_err(e: reqwest::Error) -> AppError { AppError::http(e.to_string()) }
 use crate::fish::auth::AuthManager;
 use crate::adapter::BaseAPI;
 use crate::fish::sign::{generate_sign, generate_device_id};
+use reqwest::header::HeaderValue;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -25,27 +28,27 @@ impl FishAPI {
                     let mut headers = reqwest::header::HeaderMap::new();
                     headers.insert(
                         reqwest::header::ACCEPT,
-                        "application/json".parse().unwrap(),
+                        HeaderValue::from_static("application/json"),
                     );
                     headers.insert(
                         reqwest::header::CONTENT_TYPE,
-                        "application/x-www-form-urlencoded".parse().unwrap(),
+                        HeaderValue::from_static("application/x-www-form-urlencoded"),
                     );
                     headers.insert(
                         reqwest::header::ORIGIN,
-                        "https://www.goofish.com".parse().unwrap(),
+                        HeaderValue::from_static("https://www.goofish.com"),
                     );
                     headers.insert(
                         reqwest::header::REFERER,
-                        "https://www.goofish.com/".parse().unwrap(),
+                        HeaderValue::from_static("https://www.goofish.com/"),
                     );
                     headers.insert(
                         reqwest::header::USER_AGENT,
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0".parse().unwrap(),
+                        HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"),
                     );
                     headers.insert(
                         reqwest::header::ACCEPT_LANGUAGE,
-                        "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6".parse().unwrap(),
+                        HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6"),
                     );
                     headers
                 })
@@ -85,7 +88,7 @@ impl FishAPI {
     ) -> Result<Value> {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
         let t_str = t.to_string();
         let data_val = if data.is_null() || data.as_object().map_or(true, |o| o.is_empty()) {
@@ -141,12 +144,12 @@ impl FishAPI {
             .header("cookie", self.auth.cookie_header().await)
             .body(body)
             .send()
-            .await?;
+            .await.map_err(http_err)?;
 
         // Update cookies from response headers
         self.save_cookies_from_response(&response).await;
 
-        let json: Value = response.json().await?;
+        let json: Value = response.json().await.map_err(http_err)?;
 
         // Check for error ret
         if let Some(ret) = json.get("ret").and_then(|v| v.as_array()) {
@@ -209,7 +212,7 @@ impl FishAPI {
             .and_then(|d| d.get("accessToken"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| AppError::Auth("No accessToken in response".into()))
+            .ok_or_else(|| AppError::auth("No accessToken in response"))
     }
 
     pub async fn get_mh5tk(&self) -> Result<Value> {
@@ -261,9 +264,9 @@ impl FishAPI {
             .get(url)
             .query(&initial_params)
             .send()
-            .await?;
+            .await.map_err(http_err)?;
 
-        let html = resp.text().await?;
+        let html = resp.text().await.map_err(http_err)?;
 
         // Parse window.viewData = {...}; from HTML.
         // The viewData JSON may span multiple lines and contain nested objects,
@@ -343,9 +346,9 @@ impl FishAPI {
         }
 
         let url = "https://passport.goofish.com/newlogin/qrcode/generate.do";
-        let resp = self.client.get(url).query(&params).send().await?;
+        let resp = self.client.get(url).query(&params).send().await.map_err(http_err)?;
 
-        let body: Value = resp.json().await?;
+        let body: Value = resp.json().await.map_err(http_err)?;
 
         let success = body
             .get("content")
@@ -404,7 +407,7 @@ impl FishAPI {
         tracing::debug!("qrcode_poll params: {:?}", params);
 
         let url = "https://passport.goofish.com/newlogin/qrcode/query.do";
-        let resp = self.client.post(url).form(&params).send().await?;
+        let resp = self.client.post(url).form(&params).send().await.map_err(http_err)?;
 
         // Extract set-cookie headers before consuming resp (for CONFIRMED flow)
         let set_cookie_headers: Vec<_> = resp
@@ -414,7 +417,7 @@ impl FishAPI {
             .map(|v| v.to_str().unwrap_or("").to_string())
             .collect();
 
-        let body: Value = resp.json().await?;
+        let body: Value = resp.json().await.map_err(http_err)?;
         let data = body
             .get("content")
             .and_then(|c| c.get("data"))

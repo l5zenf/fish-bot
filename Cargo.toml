@@ -22,7 +22,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # --- utilities ---
-thiserror = "1.0"
+snafu = "0.8"
+parking_lot = "0.12"
 base64 = "0.22"
 async-trait = "0.1.89"
 regex = "1"

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use parking_lot::RwLock;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
@@ -70,17 +71,17 @@ pub trait Plugin: Send + Sync + 'static {
 
 // ---- Global registry, matching Python PluginManager pattern ----
 
-static REGISTRY: std::sync::LazyLock<std::sync::RwLock<Vec<Arc<dyn Plugin>>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+static REGISTRY: std::sync::LazyLock<RwLock<Vec<Arc<dyn Plugin>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(Vec::new()));
 
 /// Register a plugin globally.
 pub fn register_plugin(plugin: impl Plugin) {
-    let mut plugins = REGISTRY.write().unwrap();
+    let mut plugins = REGISTRY.write();
     plugins.push(Arc::new(plugin));
 }
 
 /// Get all registered plugins.
 pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
-    let plugins = REGISTRY.read().unwrap();
+    let plugins = REGISTRY.read();
     plugins.clone()
 }
