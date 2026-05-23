@@ -187,7 +187,7 @@ mod tests {
     use fish_adapter::adapter::BaseAdapter;
     use fish_core::error::{AppError, Result};
     use fish_core::rule::is_fullmatch;
-    use fish_plugin::plugin::{MessageHandler, Plugin, PluginMetadata};
+    use fish_plugin::plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use kameo::actor::Spawn;
 
@@ -211,7 +211,7 @@ mod tests {
     fn make_counter_plugin(count: Arc<AtomicUsize>) -> CounterPlugin {
         CounterPlugin {
             meta: PluginMetadata { id: "counter".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("counter", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("counter", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_: HandlerContext| {
                 let c = Arc::clone(&count);
                 Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) })
             }))],
@@ -266,7 +266,8 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(EchoPlugin {
             meta: PluginMetadata { id: "echo".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("echo", RouteHint::Fallback, None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("echo", RouteHint::Fallback, None, Arc::new(|cx: HandlerContext| {
+                let event = cx.event;
                 let content = event.plain_text();
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text(content)).await;
@@ -352,9 +353,9 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin {
             meta: PluginMetadata { id: "reply".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("reply", RouteHint::Fallback, None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("reply", RouteHint::Fallback, None, Arc::new(|cx: HandlerContext| {
                 Box::pin(async move {
-                    let _ = event.reply(MessageSegment::text("reply")).await;
+                    let _ = cx.event.reply(MessageSegment::text("reply")).await;
                     Ok(())
                 })
             }))],
@@ -392,7 +393,7 @@ mod tests {
         // still checks the handler's rule on /skip
         let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin {
             meta: PluginMetadata { id: "selective".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("selective", RouteHint::Fallback, Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("selective", RouteHint::Fallback, Some(is_fullmatch(["/run"])), Arc::new(move |_: HandlerContext| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -442,9 +443,9 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin {
             meta: PluginMetadata { id: "multi_reply".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("multi_reply", RouteHint::Fallback, None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("multi_reply", RouteHint::Fallback, None, Arc::new(|cx: HandlerContext| {
                 Box::pin(async move {
-                    let _ = event.reply(MessageSegment::text("multi segment reply")).await;
+                    let _ = cx.event.reply(MessageSegment::text("multi segment reply")).await;
                     Ok(())
                 })
             }))],

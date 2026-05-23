@@ -10,9 +10,9 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::error::Result;
 use fish_core::event::MessageEvent;
-use fish_core::rule::Rule;
-
+use fish_core::rule::{is_fullmatch, is_keywords, is_regex, is_startswith, Rule};
 pub mod actor;
+
 pub mod echo;
 
 /// Plugin metadata.
@@ -53,12 +53,37 @@ pub enum RouteHint {
     Fallback,
 }
 
+/// Queue strategy when a plugin's handler concurrency limit is reached.
+#[derive(Debug, Clone)]
+pub enum QueueStrategy {
+    /// Drop new events immediately when at capacity.
+    DropNewest,
+    /// Keep a bounded queue; drop the oldest queued event when full.
+    DropOldest(usize),
+}
+
+impl Default for QueueStrategy {
+    fn default() -> Self {
+        Self::DropNewest
+    }
+}
+
+/// Context passed to every message handler execution.
+/// Carries the event, adapter for replies, and shared application context.
+/// New fields (logger, metrics, cancel_token) can be added here without
+/// changing the handler function signature.
+pub struct HandlerContext {
+    pub event: MessageEvent,
+    pub adapter: Arc<dyn BaseAdapter>,
+    pub app_ctx: Arc<Ctx>,
+}
+
 /// A pinned, boxed future returned by a handler function.
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
-/// Handler function type — takes event, adapter, context and returns a HandlerFuture.
+/// Handler function type — takes a HandlerContext and returns a HandlerFuture.
 pub type HandlerFunc = Arc<
-    dyn Fn(MessageEvent, Arc<dyn BaseAdapter>, Arc<Ctx>) -> HandlerFuture + Send + Sync,
+    dyn Fn(HandlerContext) -> HandlerFuture + Send + Sync,
 >;
 
 /// A message handler registered by a plugin.
@@ -83,6 +108,66 @@ impl MessageHandler {
             id: id.into(),
             route,
             rule,
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
+
+    /// Exact-match handler: auto-generates both RouteHint::Exact and is_fullmatch Rule.
+    /// Example: `MessageHandler::exact("ping", vec!["/ping"], handler_fn)`
+    pub fn exact(id: impl Into<String>, patterns: Vec<&str>, func: HandlerFunc) -> Self {
+        let route = RouteHint::Exact(patterns.iter().map(|s| s.to_string()).collect());
+        Self {
+            id: id.into(),
+            route,
+            rule: Some(is_fullmatch(patterns)),
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
+
+    /// Prefix-match handler: auto-generates RouteHint::Prefix and is_startswith Rule.
+    pub fn prefix(id: impl Into<String>, prefixes: Vec<&str>, func: HandlerFunc) -> Self {
+        let route = RouteHint::Prefix(prefixes.iter().map(|s| s.to_string()).collect());
+        Self {
+            id: id.into(),
+            route,
+            rule: Some(is_startswith(prefixes)),
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
+
+    /// Keyword-match handler: auto-generates RouteHint::Keyword and is_keywords Rule.
+    pub fn keyword(id: impl Into<String>, keywords: Vec<&str>, func: HandlerFunc) -> Self {
+        let route = RouteHint::Keyword(keywords.iter().map(|s| s.to_string()).collect());
+        Self {
+            id: id.into(),
+            route,
+            rule: Some(is_keywords(keywords)),
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
+
+    /// Regex handler: auto-generates RouteHint::Regex and is_regex Rule.
+    /// Bot cannot pre-filter regex — always dispatched to PluginActor for rule check.
+    pub fn regex(id: impl Into<String>, pattern: &str, func: HandlerFunc) -> Self {
+        Self {
+            id: id.into(),
+            route: RouteHint::Regex,
+            rule: Some(is_regex(pattern)),
+            timeout: Duration::from_secs(5),
+            func,
+        }
+    }
+
+    /// Catch-all handler: RouteHint::Fallback, no rule (always executes for every event).
+    pub fn fallback(id: impl Into<String>, func: HandlerFunc) -> Self {
+        Self {
+            id: id.into(),
+            route: RouteHint::Fallback,
+            rule: None,
             timeout: Duration::from_secs(5),
             func,
         }
@@ -148,8 +233,6 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
 mod tests {
     use super::*;
     use fish_core::rule::Rule;
-    use fish_adapter::adapter::BaseAdapter;
-    use async_trait::async_trait;
 
     struct TestPlugin {
         meta: PluginMetadata,
@@ -165,7 +248,7 @@ mod tests {
                     description: "测试".into(),
                     ..Default::default()
                 },
-                handlers: vec![MessageHandler::new("handler1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
+                handlers: vec![MessageHandler::new("handler1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| {
                     Box::pin(async { Ok(()) })
                 }))],
             }
@@ -201,7 +284,7 @@ mod tests {
 
     #[test]
     fn t2_4_message_handler_construct() {
-        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
+        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| {
             Box::pin(async { Ok(()) })
         }));
         assert!(handler.rule.is_none());
@@ -351,7 +434,7 @@ mod tests {
 
     #[test]
     fn t2_37_message_handler_without_rule() -> anyhow::Result<()> {
-        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
+        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| {
             Box::pin(async { Ok(()) })
         }));
         assert!(handler.rule.is_none());

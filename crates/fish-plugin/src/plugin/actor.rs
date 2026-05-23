@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use kameo::prelude::*;
@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
-use crate::plugin::{MessageHandler, Plugin, RouteHint};
+use crate::plugin::{HandlerContext, MessageHandler, Plugin, QueueStrategy, RouteHint};
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
@@ -19,22 +19,204 @@ pub struct PluginActor {
     /// Handler id → index into plugin.message_handlers() for O(1) lookup.
     handler_index: HashMap<String, usize>,
     semaphore: Arc<Semaphore>,
+    strategy: QueueStrategy,
+    /// Shared queue for DropOldest strategy.
+    pending_queue: Option<Arc<tokio::sync::Mutex<VecDeque<PendingTask>>>>,
+    /// Notifier to wake the queue processor.
+    queue_notify: Option<Arc<tokio::sync::Notify>>,
+}
+
+/// A task queued for later processing when the plugin is at capacity.
+struct PendingTask {
+    func: crate::plugin::HandlerFunc,
+    handler_id: String,
+    handler_timeout: std::time::Duration,
+    plugin_id: String,
+    cx: crate::plugin::HandlerContext,
 }
 
 impl PluginActor {
-    /// Create a new PluginActor with a default max concurrency of 64.
+    /// Create a new PluginActor with the given plugin and default concurrency of 64.
+    /// Uses `QueueStrategy::DropNewest` by default.
     pub fn new(plugin: Arc<dyn Plugin>) -> Self {
+        Self::with_strategy(plugin, QueueStrategy::default())
+    }
+
+    /// Create a new PluginActor with a custom queue strategy.
+    pub fn with_strategy(plugin: Arc<dyn Plugin>, strategy: QueueStrategy) -> Self {
         let handler_index = plugin
             .message_handlers()
             .iter()
             .enumerate()
             .map(|(i, h)| (h.id.clone(), i))
             .collect();
+
+        let (pending_queue, queue_notify) = match &strategy {
+            QueueStrategy::DropNewest => (None, None),
+            QueueStrategy::DropOldest(max_queue) => {
+                let queue: Arc<tokio::sync::Mutex<VecDeque<PendingTask>>> =
+                    Arc::new(tokio::sync::Mutex::new(VecDeque::with_capacity(*max_queue)));
+                let notify = Arc::new(tokio::sync::Notify::new());
+
+                // Background processor: drain the queue as permits become available.
+                let processor_queue = Arc::clone(&queue);
+                let processor_notify = Arc::clone(&notify);
+                let processor_semaphore = Arc::new(Semaphore::new(64));
+
+                tokio::spawn(async move {
+                    loop {
+                        let task = {
+                            let mut q = processor_queue.lock().await;
+                            q.pop_front()
+                        };
+                        match task {
+                            Some(task) => {
+                                let permit = Arc::clone(&processor_semaphore).acquire_owned().await;
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    let started = std::time::Instant::now();
+                                    let result = tokio::time::timeout(
+                                        task.handler_timeout,
+                                        (task.func)(task.cx),
+                                    )
+                                    .await;
+                                    match result {
+                                        Ok(Ok(())) => {
+                                            tracing::debug!(
+                                                plugin = %task.plugin_id,
+                                                handler = %task.handler_id,
+                                                cost_ms = started.elapsed().as_millis(),
+                                                "queued handler finished"
+                                            );
+                                        }
+                                        Ok(Err(e)) => {
+                                            tracing::error!(
+                                                plugin = %task.plugin_id,
+                                                handler = %task.handler_id,
+                                                error = %e,
+                                                cost_ms = started.elapsed().as_millis(),
+                                                "queued handler failed"
+                                            );
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                plugin = %task.plugin_id,
+                                                handler = %task.handler_id,
+                                                timeout_ms = task.handler_timeout.as_millis(),
+                                                "queued handler timeout"
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                            None => {
+                                processor_notify.notified().await;
+                            }
+                        }
+                    }
+                });
+
+                (Some(queue), Some(notify))
+            }
+        };
+
         Self {
             plugin,
             handler_index,
             semaphore: Arc::new(Semaphore::new(64)),
+            strategy,
+            pending_queue,
+            queue_notify,
         }
+    }
+
+    /// Try to acquire a permit or enqueue the task per the queue strategy.
+    fn dispatch_or_enqueue(
+        &self,
+        handler: &MessageHandler,
+        plugin_id: &str,
+        event: MessageEvent,
+        adapter: Arc<dyn BaseAdapter>,
+        ctx: Arc<Ctx>,
+    ) {
+        let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                match self.strategy {
+                    QueueStrategy::DropNewest => {
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            handler = %handler.id,
+                            "plugin busy, dropping event"
+                        );
+                        return;
+                    }
+                    QueueStrategy::DropOldest(max_queue) => {
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            handler = %handler.id,
+                            "plugin busy, enqueuing event"
+                        );
+                        if let (Some(queue), Some(notify)) = (&self.pending_queue, &self.queue_notify) {
+                            let task = PendingTask {
+                                func: handler.func.clone(),
+                                handler_id: handler.id.clone(),
+                                handler_timeout: handler.timeout,
+                                plugin_id: plugin_id.to_string(),
+                                cx: HandlerContext { event, adapter: adapter.clone(), app_ctx: ctx.clone() },
+                            };
+                            let mut q = queue.blocking_lock();
+                            if q.len() >= max_queue {
+                                q.pop_front(); // drop oldest
+                            }
+                            q.push_back(task);
+                            notify.notify_one();
+                        }
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Got a permit — spawn directly
+        let func = handler.func.clone();
+        let handler_id = handler.id.clone();
+        let handler_timeout = handler.timeout;
+        let plugin_id = plugin_id.to_string();
+        let cx = HandlerContext { event, adapter, app_ctx: ctx };
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(handler_timeout, func(cx)).await;
+            match result {
+                Ok(Ok(())) => {
+                    tracing::debug!(
+                        plugin = %plugin_id,
+                        handler = %handler_id,
+                        cost_ms = started.elapsed().as_millis(),
+                        "handler finished"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        plugin = %plugin_id,
+                        handler = %handler_id,
+                        error = %e,
+                        cost_ms = started.elapsed().as_millis(),
+                        "handler failed"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        plugin = %plugin_id,
+                        handler = %handler_id,
+                        timeout_ms = handler_timeout.as_millis(),
+                        "handler timeout"
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -99,63 +281,13 @@ impl Message<HandleEvent> for PluginActor {
         };
 
         for handler in matched_handlers {
-            // Try to acquire a semaphore permit before spawning.
-            // If the plugin is at capacity, drop the event with a warning
-            // instead of queuing unbounded tasks.
-            let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    tracing::warn!(
-                        plugin = %plugin_id,
-                        handler = %handler.id,
-                        "plugin busy, dropping event"
-                    );
-                    continue;
-                }
-            };
-
-            let func = handler.func.clone();
-            let handler_id = handler.id.clone();
-            let plugin_id = plugin_id.clone();
-            let handler_timeout = handler.timeout;
-            let event = msg.event.clone();
-            let adapter = Arc::clone(&msg.adapter);
-            let ctx = Arc::clone(&msg.ctx);
-
-            tokio::spawn(async move {
-                let _permit = permit;
-                let started = std::time::Instant::now();
-
-                let result = tokio::time::timeout(handler_timeout, func(event, adapter, ctx)).await;
-
-                match result {
-                    Ok(Ok(())) => {
-                        tracing::debug!(
-                            plugin = %plugin_id,
-                            handler = %handler_id,
-                            cost_ms = started.elapsed().as_millis(),
-                            "handler finished"
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(
-                            plugin = %plugin_id,
-                            handler = %handler_id,
-                            error = %e,
-                            cost_ms = started.elapsed().as_millis(),
-                            "handler failed"
-                        );
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            plugin = %plugin_id,
-                            handler = %handler_id,
-                            timeout_ms = handler_timeout.as_millis(),
-                            "handler timeout"
-                        );
-                    }
-                }
-            });
+            self.dispatch_or_enqueue(
+                handler,
+                &plugin_id,
+                msg.event.clone(),
+                Arc::clone(&msg.adapter),
+                Arc::clone(&msg.ctx),
+            );
         }
     }
 }
@@ -195,7 +327,8 @@ mod tests {
     fn make_test_plugin() -> TestPlugin {
         TestPlugin {
             meta: PluginMetadata { id: "test".into(), name: "test".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("ping", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("ping", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(|cx: HandlerContext| {
+                let event = cx.event;
                 let reply = event.plain_text();
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text(reply)).await;
@@ -232,7 +365,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
             meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_: HandlerContext| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -264,7 +397,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
             meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_: HandlerContext| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -293,7 +426,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(NoRulePlugin {
             meta: PluginMetadata { id: "norule".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
@@ -317,7 +450,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(PanicPlugin {
             meta: PluginMetadata { id: "panic".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("panic", RouteHint::Fallback, None, Arc::new(|_, _, _| {
+            handlers: vec![MessageHandler::new("panic", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| {
                 Box::pin(async { std::panic::panic_any("intentional panic") })
             }))],
         });
@@ -349,15 +482,15 @@ mod tests {
             handlers: vec![
                 MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
-                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
                 MessageHandler::new("h2", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
-                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
                 MessageHandler::new("h3", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
-                    move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
             ],
         });
@@ -388,7 +521,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(SkipPlugin {
             meta: PluginMetadata { id: "skip".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("skip", RouteHint::Exact(vec!["/run".into()]), Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("skip", RouteHint::Exact(vec!["/run".into()]), Some(is_fullmatch(["/run"])), Arc::new(move |_: HandlerContext| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -426,11 +559,13 @@ mod tests {
         let au = Arc::clone(&adapter_used);
         let plugin: Arc<dyn Plugin> = Arc::new(DepsPlugin {
             meta: PluginMetadata { id: "deps".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("deps", RouteHint::Fallback, None, Arc::new(move |_, adapter, handler_ctx| {
+            handlers: vec![MessageHandler::new("deps", RouteHint::Fallback, None, Arc::new(move |cx: HandlerContext| {
                 let cc = Arc::clone(&cu);
                 let ac = Arc::clone(&au);
+                let adapter = cx.adapter;
+                let app_ctx = cx.app_ctx;
                 Box::pin(async move {
-                    if handler_ctx.get::<CtxMarker>().is_some() {
+                    if app_ctx.get::<CtxMarker>().is_some() {
                         cc.store(true, Ordering::SeqCst);
                     }
                     let _ = adapter.send("test", &MessageChain::from(""), None).await;
@@ -488,15 +623,15 @@ mod tests {
             handlers: vec![
                 MessageHandler::new("ping_rule", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new({
                     let count = Arc::clone(&c);
-                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
                 MessageHandler::new("pong_rule", RouteHint::Exact(vec!["/pong".into()]), Some(is_fullmatch(["/pong"])), Arc::new({
                     let count = Arc::clone(&c);
-                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); Ok(()) }) }
                 })),
                 MessageHandler::new("catchall", RouteHint::Fallback, None, Arc::new({
                     let count = Arc::clone(&c);
-                    move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); Ok(()) }) }
+                    move |_: HandlerContext| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); Ok(()) }) }
                 })),
             ],
         });
@@ -521,7 +656,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(NamedPlugin {
             meta: PluginMetadata { id: "named".into(), name: "TestName".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
@@ -546,7 +681,7 @@ mod tests {
         let c = Arc::clone(&counter);
         let plugin: Arc<dyn Plugin> = Arc::new(CountPlugin {
             meta: PluginMetadata { id: "count".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("count", RouteHint::Fallback, None, Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("count", RouteHint::Fallback, None, Arc::new(move |_: HandlerContext| {
                 let c2 = Arc::clone(&c);
                 Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) })
             }))],
@@ -574,7 +709,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(CustomMetaPlugin {
             meta: PluginMetadata { id: "custom_meta".into(), name: "元数据测试".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_: HandlerContext| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 

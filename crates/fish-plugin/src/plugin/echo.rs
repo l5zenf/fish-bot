@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
-use fish_adapter::adapter::BaseAdapter;
-use fish_core::ctx::Ctx;
-use fish_core::event::MessageEvent;
 use fish_core::message::MessageSegment;
-use crate::plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
-use fish_core::rule::is_fullmatch;
+use crate::plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
 
 /// Echo plugin — replies with the received message content.
 pub struct EchoPlugin {
@@ -23,15 +19,14 @@ impl EchoPlugin {
                 version: "1.0.0".into(),
                 author: "Kaguya233qwq".into(),
             },
-            handlers: vec![MessageHandler::new(
+            handlers: vec![MessageHandler::exact(
                 "echo",
-                RouteHint::Exact(vec!["/echo".into()]),
-                Some(is_fullmatch(["/echo"])),
-                Arc::new(|event: MessageEvent, _adapter: Arc<dyn BaseAdapter>, _ctx: Arc<Ctx>| {
+                vec!["/echo"],
+                Arc::new(|cx: HandlerContext| {
                     Box::pin(async move {
-                        let content = event.plain_text().trim().to_string();
+                        let content = cx.event.plain_text().trim().to_string();
                         let reply_msg = format!("Echo: {}", content);
-                        event.reply(MessageSegment::text(reply_msg)).await;
+                        cx.event.reply(MessageSegment::text(reply_msg)).await;
                         Ok(())
                     })
                 }),
@@ -113,7 +108,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
 
         assert_eq!(*captured.lock(), "Echo: /echo");
     }
@@ -162,7 +157,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
 
         assert_eq!(*captured.lock(), "Echo: ");
         Ok(())
@@ -190,7 +185,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(event, adapter, ctx).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx }).await;
 
         assert_eq!(*captured.lock(), "Echo: hello");
         Ok(())
