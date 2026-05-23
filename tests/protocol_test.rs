@@ -1,10 +1,11 @@
-use fish_bot::protocol::{encode_message, decode_message};
-use fish_bot::model::Message;
+use fish_core::message::MessageSegment;
+use fish_adapter::fish::protocol::{encode_message, decode_message};
 
 #[test]
-fn test_text_encode_decode() {
-    let msg = Message::Text { text: "hello".to_string() };
-    let encoded = encode_message(&msg).unwrap();
-    let decoded = decode_message(&encoded).unwrap();
-    assert!(matches!(decoded, Message::Text { text } if text == "hello"));
+fn test_text_encode_decode() -> anyhow::Result<()> {
+    let msg = MessageSegment::Text { text: "hello".to_string() };
+    let (encoded, _) = encode_message(&msg)?;
+    let decoded = decode_message(&encoded)?;
+    assert!(matches!(decoded, MessageSegment::Text { text } if text == "hello"));
+    Ok(())
 }

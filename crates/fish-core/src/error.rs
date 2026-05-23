@@ -56,3 +56,71 @@ impl AppError {
         AppError::Ws { message: message.into() }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t1_34_error_constructors() {
+        let e = AppError::auth("login failed");
+        assert!(matches!(e, AppError::Auth { .. }));
+
+        let e = AppError::protocol("bad message");
+        assert!(matches!(e, AppError::Protocol { .. }));
+
+        let e = AppError::http("timeout");
+        assert!(matches!(e, AppError::Http { .. }));
+
+        let e = AppError::ws("disconnected");
+        assert!(matches!(e, AppError::Ws { .. }));
+    }
+
+    #[test]
+    fn t1_35_display_all_variants() {
+        let cases: Vec<(AppError, &str)> = vec![
+            (AppError::Http { message: "timeout".into() }, "HTTP request failed: timeout"),
+            (AppError::Ws { message: "closed".into() }, "WebSocket error: closed"),
+            (AppError::Json { source: serde_json::from_str::<()>("invalid").unwrap_err() },
+             "JSON error:"),
+            (AppError::Base64 { source: base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err() },
+             "Base64 decode error:"),
+            (AppError::Auth { details: "bad token".into() }, "Authentication failed: bad token"),
+            (AppError::Protocol { details: "bad msg".into() }, "Protocol error: bad msg"),
+            (AppError::Internal { details: "oops".into() }, "Internal error: oops"),
+        ];
+
+        for (err, expected_prefix) in cases {
+            let display = err.to_string();
+            assert!(display.starts_with(expected_prefix),
+                "expected '{display}' to start with '{expected_prefix}'");
+        }
+    }
+
+    #[test]
+    fn t1_36_from_serde_json_error() {
+        let result: std::result::Result<(), AppError> =
+            Err(serde_json::from_str::<()>("invalid").unwrap_err()).map_err(Into::into);
+        assert!(matches!(result, Err(AppError::Json { .. })));
+    }
+
+    #[test]
+    fn t1_37_from_base64_error() {
+        let result: std::result::Result<(), AppError> =
+            Err(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err())
+                .map_err(Into::into);
+        assert!(matches!(result, Err(AppError::Base64 { .. })));
+    }
+
+    #[test]
+    fn t1_38_result_type_alias() -> anyhow::Result<()> {
+        fn foo() -> Result<i32> {
+            Ok(42)
+        }
+        fn bar() -> std::result::Result<i32, AppError> {
+            Ok(42)
+        }
+        assert_eq!(foo()?, bar()?);
+        Ok(())
+    }
+}

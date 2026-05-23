@@ -159,6 +159,256 @@ pub fn decode_message(payload: &Value) -> Result<MessageSegment> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! seg_text {
+        ($t:expr) => { MessageSegment::Text { text: $t.into() } };
+    }
+
+    fn make_ct_payload(ct: i64, extra: serde_json::Value) -> Value {
+        let mut map = serde_json::Map::new();
+        map.insert("contentType".into(), serde_json::json!(ct));
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn t3_3_encode_text() -> anyhow::Result<()> {
+        let msg = seg_text!("hello");
+        let (payload, ct) = encode_message(&msg)?;
+        assert_eq!(ct, 1);
+        assert_eq!(payload["contentType"], 1);
+        assert_eq!(payload["text"]["text"], "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_4_encode_image() -> anyhow::Result<()> {
+        let msg = MessageSegment::Image {
+            image_url: "https://example.com/pic.jpg".into(),
+            width: 800,
+            height: 600,
+        };
+        let (payload, ct) = encode_message(&msg)?;
+        assert_eq!(ct, 2);
+        assert_eq!(payload["contentType"], 2);
+        assert_eq!(payload["image"]["pics"][0]["url"], "https://example.com/pic.jpg");
+        assert_eq!(payload["image"]["pics"][0]["width"], 800);
+        assert_eq!(payload["image"]["pics"][0]["height"], 600);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_5_encode_audio() -> anyhow::Result<()> {
+        let msg = MessageSegment::Audio {
+            audio_url: "https://example.com/a.mp3".into(),
+            duration_ms: 5000,
+        };
+        let (payload, ct) = encode_message(&msg)?;
+        assert_eq!(ct, 2);
+        assert_eq!(payload["contentType"], 3);
+        assert_eq!(payload["audio"]["url"], "https://example.com/a.mp3");
+        assert_eq!(payload["audio"]["duration"], 5000);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_6_encode_custom_node() -> anyhow::Result<()> {
+        let content = serde_json::json!([{"type": "text", "text": "hello"}]);
+        let msg = MessageSegment::CustomNode {
+            desc: "test".into(),
+            content: content.clone(),
+        };
+        let (payload, ct) = encode_message(&msg)?;
+        assert_eq!(ct, 2);
+        assert_eq!(payload["contentType"], 101);
+        let data = payload["custom"]["data"].as_str().ok_or_else(|| anyhow::anyhow!("custom.data should be a string"))?;
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)?;
+        let parsed: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(parsed[0]["text"], "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_7_encode_chain_single() -> anyhow::Result<()> {
+        let chain = [seg_text!("hello")];
+        let (payload, ct) = encode_chain(&chain)?;
+        assert_eq!(ct, 1);
+        assert_eq!(payload["text"]["text"], "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_8_encode_chain_multi() -> anyhow::Result<()> {
+        let chain = [seg_text!("a"), seg_text!("b")];
+        let (payload, ct) = encode_chain(&chain)?;
+        assert_eq!(ct, 2);
+        assert_eq!(payload["contentType"], 101);
+        let data = payload["custom"]["data"].as_str().ok_or_else(|| anyhow::anyhow!("custom.data should be a string"))?;
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)?;
+        let parsed: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(parsed[0]["text"], "a");
+        assert_eq!(parsed[1]["text"], "b");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_9_decode_text() -> anyhow::Result<()> {
+        let payload = make_ct_payload(1, serde_json::json!({"text": {"text": "hello"}}));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(decoded, MessageSegment::Text { ref text } if text == "hello"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_10_decode_image() -> anyhow::Result<()> {
+        let payload = make_ct_payload(2, serde_json::json!({
+            "image": {"pics": [{"url": "pic.jpg", "width": 800, "height": 600}]}
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(decoded, MessageSegment::Image { ref image_url, width: 800, height: 600 }
+            if image_url == "pic.jpg"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_11_decode_audio() -> anyhow::Result<()> {
+        let payload = make_ct_payload(3, serde_json::json!({
+            "audio": {"url": "a.mp3", "duration": 5000}
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(decoded, MessageSegment::Audio { ref audio_url, duration_ms: 5000 }
+            if audio_url == "a.mp3"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_12_decode_item_card() -> anyhow::Result<()> {
+        let payload = make_ct_payload(7, serde_json::json!({
+            "itemCard": {
+                "item": {"itemId": "123", "title": "test item", "price": "100", "mainPic": "pic.jpg"},
+                "action": {"page": {"url": "https://item.page"}}
+            }
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(&decoded, MessageSegment::CustomNode { desc, .. } if desc == "商品卡片"));
+        if let MessageSegment::CustomNode { content, .. } = &decoded {
+            assert_eq!(content["fish_type"], "item_card");
+            assert_eq!(content["item_id"], "123");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_13_decode_system_tip() -> anyhow::Result<()> {
+        let payload = make_ct_payload(14, serde_json::json!({
+            "tip": {"tip": "system message"}
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(&decoded, MessageSegment::CustomNode { desc, .. } if desc == "系统提示"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_14_decode_fish_trade_card() -> anyhow::Result<()> {
+        let payload = make_ct_payload(26, serde_json::json!({
+            "dxCard": {
+                "item": {
+                    "main": {
+                        "exContent": {"title": "order title", "desc": "order desc"},
+                        "clickParam": {"args": {"task_id": "task123"}}
+                    }
+                },
+                "button": {"text": "查看", "targetUrl": "https://example.com?id=order456"}
+            }
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(&decoded, MessageSegment::CustomNode { desc, .. } if desc == "交易卡片"));
+        if let MessageSegment::CustomNode { content, .. } = &decoded {
+            assert_eq!(content["order_id"], "order456");
+            assert_eq!(content["task_id"], "task123");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_15_decode_custom_101() -> anyhow::Result<()> {
+        let inner = serde_json::json!([{"type":"text","text":"hello"}]);
+        let inner_str = serde_json::to_string(&inner)?;
+        let data = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            inner_str,
+        );
+        let payload = make_ct_payload(101, serde_json::json!({
+            "custom": {"type": 2, "data": data}
+        }));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(&decoded, MessageSegment::CustomNode { .. }));
+        if let MessageSegment::CustomNode { content, .. } = &decoded {
+            assert_eq!(content[0]["text"], "hello");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_16_decode_unknown_ct() -> anyhow::Result<()> {
+        let payload = make_ct_payload(999, serde_json::json!({}));
+        let decoded = decode_message(&payload)?;
+        assert!(matches!(&decoded, MessageSegment::CustomNode { desc, .. } if desc == "未知消息"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_17_decode_content_variants() -> anyhow::Result<()> {
+        let payload = make_ct_payload(1, serde_json::json!({"text": {"text": "hi"}}));
+        let segs = decode_content(&payload)?;
+        assert_eq!(segs.len(), 1);
+
+        let arr = serde_json::json!([
+            {"contentType": 1, "text": {"text": "a"}},
+            {"contentType": 1, "text": {"text": "b"}},
+        ]);
+        let segs = decode_content(&arr)?;
+        assert_eq!(segs.len(), 2);
+
+        let empty = serde_json::json!({});
+        let segs = decode_content(&empty)?;
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], MessageSegment::CustomNode { desc, .. } if desc == "未知消息"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_18_encode_decode_roundtrip() -> anyhow::Result<()> {
+        let cases = vec![
+            seg_text!("hello"),
+            MessageSegment::Image {
+                image_url: "https://pic.jpg".into(),
+                width: 100,
+                height: 200,
+            },
+            MessageSegment::Audio {
+                audio_url: "https://a.mp3".into(),
+                duration_ms: 3000,
+            },
+        ];
+
+        for original in cases {
+            let (payload, _) = encode_message(&original)?;
+            let decoded = decode_message(&payload)?;
+            assert_eq!(original.desc(), decoded.desc());
+            assert_eq!(original.summary(), decoded.summary());
+        }
+        Ok(())
+    }
+}
+
 /// Parse raw fish protocol body into a Vec<MessageSegment>.
 pub fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
     // Check if this is a structured content object with contentType

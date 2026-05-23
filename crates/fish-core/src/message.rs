@@ -201,3 +201,194 @@ impl From<&str> for MessageChainItem {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- MessageSegment tests ----
+
+    #[test]
+    fn t1_1_text_construction_and_serde() -> anyhow::Result<()> {
+        let seg = MessageSegment::text("hello");
+        assert!(matches!(seg, MessageSegment::Text { ref text } if text == "hello"));
+
+        let json = serde_json::to_string(&seg)?;
+        let deser: MessageSegment = serde_json::from_str(&json)?;
+        assert!(matches!(deser, MessageSegment::Text { ref text } if text == "hello"));
+        Ok(())
+    }
+
+    #[test]
+    fn t1_2_image_construction_and_serde() -> anyhow::Result<()> {
+        let seg = MessageSegment::image("https://example.com/pic.jpg");
+        assert!(matches!(seg, MessageSegment::Image { ref image_url, width: 0, height: 0 }
+            if image_url == "https://example.com/pic.jpg"));
+
+        let json = serde_json::to_string(&seg)?;
+        let deser: MessageSegment = serde_json::from_str(&json)?;
+        assert!(matches!(deser, MessageSegment::Image { ref image_url, width: 0, height: 0 }
+            if image_url == "https://example.com/pic.jpg"));
+        Ok(())
+    }
+
+    #[test]
+    fn t1_3_audio_and_customnode_construction() -> anyhow::Result<()> {
+        let audio = MessageSegment::Audio {
+            audio_url: "https://example.com/audio.mp3".into(),
+            duration_ms: 5000,
+        };
+        assert!(matches!(&audio, MessageSegment::Audio { audio_url, duration_ms: 5000 }
+            if audio_url == "https://example.com/audio.mp3"));
+
+        let custom = MessageSegment::CustomNode {
+            desc: "test".into(),
+            content: serde_json::json!({"key": "value"}),
+        };
+        assert!(matches!(&custom, MessageSegment::CustomNode { desc, .. } if desc == "test"));
+
+        for seg in [audio, custom] {
+            let json = serde_json::to_string(&seg)?;
+            let deser: MessageSegment = serde_json::from_str(&json)?;
+            assert_eq!(seg.desc(), deser.desc());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t1_4_desc_labels() {
+        assert_eq!(MessageSegment::text("hi").desc(), "文本");
+        assert_eq!(MessageSegment::image("url").desc(), "图片");
+        assert_eq!(
+            MessageSegment::Audio { audio_url: "url".into(), duration_ms: 0 }.desc(),
+            "音频"
+        );
+        assert_eq!(
+            MessageSegment::CustomNode { desc: "".into(), content: serde_json::json!({}) }.desc(),
+            "节点消息"
+        );
+        assert_eq!(
+            MessageSegment::CustomNode { desc: "卡片".into(), content: serde_json::json!({}) }.desc(),
+            "卡片"
+        );
+    }
+
+    #[test]
+    fn t1_5_summary() {
+        assert_eq!(MessageSegment::text("hello").summary(), "hello");
+        assert_eq!(MessageSegment::image("url").summary(), "[图片]");
+        assert_eq!(
+            MessageSegment::Audio { audio_url: "url".into(), duration_ms: 0 }.summary(),
+            "[音频]"
+        );
+        assert_eq!(
+            MessageSegment::CustomNode { desc: "test".into(), content: serde_json::json!({}) }.summary(),
+            "[test]"
+        );
+    }
+
+    // ---- MessageChain tests ----
+
+    #[test]
+    fn t1_6_chain_new_from_segment_is_empty() {
+        let chain = MessageChain::new();
+        assert!(chain.is_empty());
+
+        let chain = MessageChain::from_segment(MessageSegment::text("hi"));
+        assert!(!chain.is_empty());
+    }
+
+    #[test]
+    fn t1_7_chain_append() {
+        let mut chain = MessageChain::new();
+        chain.append(MessageSegment::text("a"));
+        chain.append("b");
+        chain.append(String::from("c"));
+
+        assert_eq!(chain.plain_text(), "abc");
+        assert_eq!(chain.segments().len(), 3);
+    }
+
+    #[test]
+    fn t1_8_chain_extend() {
+        let mut chain = MessageChain::new();
+        chain.extend(vec![
+            MessageSegment::text("a"),
+            MessageSegment::text("b"),
+            MessageSegment::text("c"),
+        ]);
+        assert_eq!(chain.plain_text(), "abc");
+        assert_eq!(chain.segments().len(), 3);
+    }
+
+    #[test]
+    fn t1_9_chain_plain_text_only_text() {
+        let mut chain = MessageChain::new();
+        chain.append(MessageSegment::text("hello"));
+        chain.append(MessageSegment::image("pic.jpg"));
+        chain.append(MessageSegment::text(" world"));
+
+        assert_eq!(chain.plain_text(), "hello world");
+    }
+
+    #[test]
+    fn t1_10_chain_summary() {
+        // Empty
+        let chain = MessageChain::new();
+        assert_eq!(chain.summary(), "(空消息)");
+
+        // Plain text only
+        let mut chain = MessageChain::new();
+        chain.append("hello");
+        assert_eq!(chain.summary(), "hello");
+
+        // Mixed
+        let mut chain = MessageChain::new();
+        chain.append(MessageSegment::text("check this"));
+        chain.append(MessageSegment::image("pic.jpg"));
+        assert_eq!(chain.summary(), "check this [图片]");
+    }
+
+    #[test]
+    fn t1_11_has_image() {
+        let mut chain = MessageChain::new();
+        assert!(!chain.has_image());
+
+        chain.append(MessageSegment::text("no pic"));
+        assert!(!chain.has_image());
+
+        chain.append(MessageSegment::image("pic.jpg"));
+        assert!(chain.has_image());
+    }
+
+    #[test]
+    fn t1_12_from_impls_message_chain() {
+        // String -> MessageChain
+        let chain: MessageChain = String::from("hello").into();
+        assert_eq!(chain.plain_text(), "hello");
+
+        // &str -> MessageChain
+        let chain: MessageChain = "world".into();
+        assert_eq!(chain.plain_text(), "world");
+
+        // MessageSegment -> MessageChain
+        let chain: MessageChain = MessageSegment::image("pic.jpg").into();
+        assert!(chain.has_image());
+
+        // Vec<MessageSegment> -> MessageChain
+        let chain: MessageChain = vec![
+            MessageSegment::text("a"),
+            MessageSegment::text("b"),
+        ].into();
+        assert_eq!(chain.plain_text(), "ab");
+    }
+
+    #[test]
+    fn t1_13_message_chain_item_from() {
+        // All From impls for MessageChainItem
+        let _: MessageChainItem = MessageSegment::text("x").into();
+        let _: MessageChainItem = MessageChain::new().into();
+        let _: MessageChainItem = String::from("x").into();
+        let _: MessageChainItem = "x".into();
+    }
+}

@@ -85,3 +85,73 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
     let plugins = REGISTRY.read();
     plugins.clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestPlugin;
+
+    impl Plugin for TestPlugin {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata {
+                id: "test".into(),
+                name: "测试插件".into(),
+                description: "测试".into(),
+                ..Default::default()
+            }
+        }
+
+        fn message_handlers(&self) -> Vec<MessageHandler> {
+            vec![MessageHandler {
+                func: Arc::new(|_, _, _| Box::pin(async {})),
+                rule: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn t2_1_metadata_defaults() {
+        let meta = PluginMetadata::default();
+        assert_eq!(meta.id, "");
+        assert_eq!(meta.name, "");
+        assert_eq!(meta.version, "1.0.0");
+        assert_eq!(meta.author, "Unknown");
+    }
+
+    #[test]
+    fn t2_2_register_and_list() {
+        register_plugin(TestPlugin);
+        let plugins = registered_plugins();
+        // We can't assert exact length because other tests may register too,
+        // but we can check our plugin is present
+        let found = plugins.iter().any(|p| p.metadata().id == "test");
+        assert!(found);
+    }
+
+    #[test]
+    fn t2_4_message_handler_construct() {
+        let handler = MessageHandler {
+            func: Arc::new(|_, _, _| Box::pin(async {})),
+            rule: None,
+        };
+        assert!(handler.rule.is_none());
+    }
+
+    #[test]
+    fn t2_3_duplicate_registration_allowed() {
+        struct DupPlugin;
+        impl Plugin for DupPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+        // Registering the same plugin type twice should not panic
+        register_plugin(DupPlugin);
+        register_plugin(DupPlugin);
+        let plugins = registered_plugins();
+        let count = plugins.iter().filter(|p| p.metadata().id == "dup").count();
+        assert_eq!(count, 2, "duplicate registration should be allowed at registry level");
+    }
+}

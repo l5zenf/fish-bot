@@ -114,3 +114,114 @@ impl std::fmt::Debug for Rule {
         f.debug_struct("Rule").finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::MessageEvent;
+    use crate::message::MessageChain;
+
+    fn make_event(text: &str) -> MessageEvent {
+        MessageEvent::new(
+            "cid".into(),
+            "uid".into(),
+            "name".into(),
+            MessageChain::from(text),
+            serde_json::json!({}),
+        )
+    }
+
+    #[test]
+    fn t1_19_rule_new_and_check() {
+        let rule = Rule::new(|event: &MessageEvent| event.plain_text() == "ping");
+        assert!(rule.check(&make_event("ping")));
+        assert!(!rule.check(&make_event("pong")));
+    }
+
+    #[test]
+    fn t1_20_rule_and_truth_table() {
+        let t = Rule::new(|_: &MessageEvent| true);
+        let f = Rule::new(|_: &MessageEvent| false);
+
+        assert!((t.and(&t)).check(&make_event("")));
+        assert!(!(t.and(&f)).check(&make_event("")));
+        assert!(!(f.and(&t)).check(&make_event("")));
+        assert!(!(f.and(&f)).check(&make_event("")));
+    }
+
+    #[test]
+    fn t1_21_rule_or_truth_table() {
+        let t = Rule::new(|_: &MessageEvent| true);
+        let f = Rule::new(|_: &MessageEvent| false);
+
+        assert!((t.or(&t)).check(&make_event("")));
+        assert!((t.or(&f)).check(&make_event("")));
+        assert!((f.or(&t)).check(&make_event("")));
+        assert!(!(f.or(&f)).check(&make_event("")));
+    }
+
+    #[test]
+    fn t1_22_is_startswith() {
+        let r = is_startswith("/admin");
+        assert!(r.check(&make_event("/admin help")));
+        assert!(!r.check(&make_event("help /admin")));
+
+        let r = is_startswith(vec!["/admin", "/mod"]);
+        assert!(r.check(&make_event("/admin help")));
+        assert!(r.check(&make_event("/mod list")));
+        assert!(!r.check(&make_event("/user list")));
+    }
+
+    #[test]
+    fn t1_23_is_fullmatch() {
+        let r = is_fullmatch("/ping");
+        assert!(r.check(&make_event("/ping")));
+        assert!(r.check(&make_event("  /ping  "))); // trimmed
+        assert!(!r.check(&make_event("/pong")));
+
+        let r = is_fullmatch(["/help", "/h", "帮助"]);
+        assert!(r.check(&make_event("/help")));
+        assert!(r.check(&make_event("/h")));
+        assert!(r.check(&make_event("帮助")));
+        assert!(!r.check(&make_event("/help me")));
+    }
+
+    #[test]
+    fn t1_24_is_keywords() {
+        let r = is_keywords("delete");
+        assert!(r.check(&make_event("please delete this")));
+        assert!(!r.check(&make_event("hello world")));
+
+        let r = is_keywords(vec!["delete", "remove"]);
+        assert!(r.check(&make_event("remove item")));
+        assert!(r.check(&make_event("delete item")));
+        assert!(!r.check(&make_event("view item")));
+    }
+
+    #[test]
+    fn t1_25_is_regex() {
+        let r = is_regex(r"^\d{11}$");
+        assert!(r.check(&make_event("13800138000")));
+        assert!(!r.check(&make_event("not-a-phone")));
+
+        // Invalid pattern => never matches
+        let r = is_regex(r"[invalid");
+        assert!(!r.check(&make_event("anything")));
+    }
+
+    #[test]
+    fn t1_26_matchlist_from() {
+        let _: MatchList = "single".into();
+        let _: MatchList = String::from("single").into();
+        let _: MatchList = vec!["a", "b"].into();
+        let _: MatchList = ["a", "b"].into();
+    }
+
+    #[test]
+    fn t1_27_compound_rule() {
+        let r = is_startswith("/admin").and(&is_keywords("delete"));
+        assert!(r.check(&make_event("/admin delete user")));
+        assert!(!r.check(&make_event("/admin view")));
+        assert!(!r.check(&make_event("/user delete")));
+    }
+}

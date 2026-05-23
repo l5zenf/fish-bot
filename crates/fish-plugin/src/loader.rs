@@ -50,3 +50,79 @@ impl Default for PluginManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::{register_plugin, Plugin, PluginMetadata, MessageHandler};
+
+    struct TestPluginA;
+    impl Plugin for TestPluginA {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata { id: "plugin_a".into(), name: "A".into(), description: "".into(), ..Default::default() }
+        }
+        fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+    }
+
+    struct TestPluginB;
+    impl Plugin for TestPluginB {
+        fn metadata(&self) -> PluginMetadata {
+            PluginMetadata { id: "plugin_b".into(), name: "B".into(), description: "".into(), ..Default::default() }
+        }
+        fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+    }
+
+    #[test]
+    fn t2_14_new_empty_manager() {
+        let mgr = PluginManager::new();
+        assert_eq!(mgr.len(), 0);
+        assert!(mgr.is_empty());
+    }
+
+    #[test]
+    fn t2_15_load_all_plugins() {
+        register_plugin(TestPluginA);
+        register_plugin(TestPluginB);
+
+        let mut mgr = PluginManager::new();
+        mgr.load_all_plugins();
+        // Can't assert exact len (shared global registry with other tests)
+        assert!(mgr.plugins.contains_key("plugin_a"), "plugin_a should be loaded");
+        assert!(mgr.plugins.contains_key("plugin_b"), "plugin_b should be loaded");
+    }
+
+    #[test]
+    fn t2_17_is_empty_before_after() {
+        let mgr = PluginManager::new();
+        assert!(mgr.is_empty());
+    }
+
+    #[test]
+    fn t2_16_duplicate_id_skipped() {
+        struct PluginX;
+        impl Plugin for PluginX {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "test_dupe_id".into(), name: "X".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+        struct PluginXDuplicate;
+        impl Plugin for PluginXDuplicate {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "test_dupe_id".into(), name: "X2".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+
+        register_plugin(PluginX);
+        register_plugin(PluginXDuplicate);
+
+        let mut mgr = PluginManager::new();
+        mgr.load_all_plugins();
+        // Only one should be loaded for "test_dupe_id" (first one = "X" wins)
+        assert!(mgr.plugins.contains_key("test_dupe_id"), "plugin should be loaded");
+        // The first registered plugin's name wins
+        assert_eq!(mgr.plugins["test_dupe_id"].metadata().name, "X",
+            "first registered plugin should be the one loaded");
+    }
+}
