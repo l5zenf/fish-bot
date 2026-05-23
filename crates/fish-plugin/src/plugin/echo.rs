@@ -4,7 +4,7 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use fish_core::message::MessageSegment;
-use crate::plugin::{MessageHandler, Plugin, PluginMetadata};
+use crate::plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
 use fish_core::rule::is_fullmatch;
 
 /// Echo plugin — replies with the received message content.
@@ -25,6 +25,7 @@ impl EchoPlugin {
             },
             handlers: vec![MessageHandler::new(
                 "echo",
+                RouteHint::Exact(vec!["/echo".into()]),
                 Some(is_fullmatch(["/echo"])),
                 Arc::new(|event: MessageEvent, _adapter: Arc<dyn BaseAdapter>, _ctx: Arc<Ctx>| {
                     Box::pin(async move {

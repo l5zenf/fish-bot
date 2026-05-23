@@ -37,6 +37,22 @@ impl Default for PluginMetadata {
     }
 }
 
+/// Route hint for Bot-level routing table.
+/// Allows Bot to pre-filter messages by text before dispatching to PluginActor.
+#[derive(Debug, Clone)]
+pub enum RouteHint {
+    /// Exact trimmed-text match, e.g. "/ping". Bot looks up in HashMap.
+    Exact(Vec<String>),
+    /// Text starts with any of these prefixes, e.g. "/admin".
+    Prefix(Vec<String>),
+    /// Text contains any of these keywords.
+    Keyword(Vec<String>),
+    /// Regex-based match — Bot cannot pre-filter, always dispatched.
+    Regex,
+    /// No pre-filter hint — always dispatched (catch-all handlers).
+    Fallback,
+}
+
 /// A pinned, boxed future returned by a handler function.
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
@@ -48,17 +64,24 @@ pub type HandlerFunc = Arc<
 /// A message handler registered by a plugin.
 pub struct MessageHandler {
     pub id: String,
+    pub route: RouteHint,
     pub rule: Option<Rule>,
     pub timeout: Duration,
     pub func: HandlerFunc,
 }
 
 impl MessageHandler {
-    /// Create a new handler with the given id, optional rule, and function.
+    /// Create a new handler with the given id, route hint, optional rule, and function.
     /// Default timeout is 5 seconds.
-    pub fn new(id: impl Into<String>, rule: Option<Rule>, func: HandlerFunc) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        route: RouteHint,
+        rule: Option<Rule>,
+        func: HandlerFunc,
+    ) -> Self {
         Self {
             id: id.into(),
+            route,
             rule,
             timeout: Duration::from_secs(5),
             func,
@@ -142,7 +165,7 @@ mod tests {
                     description: "测试".into(),
                     ..Default::default()
                 },
-                handlers: vec![MessageHandler::new("handler1", None, Arc::new(|_, _, _| {
+                handlers: vec![MessageHandler::new("handler1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
                     Box::pin(async { Ok(()) })
                 }))],
             }
@@ -178,7 +201,7 @@ mod tests {
 
     #[test]
     fn t2_4_message_handler_construct() {
-        let handler = MessageHandler::new("h1", None, Arc::new(|_, _, _| {
+        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
             Box::pin(async { Ok(()) })
         }));
         assert!(handler.rule.is_none());
@@ -328,7 +351,7 @@ mod tests {
 
     #[test]
     fn t2_37_message_handler_without_rule() -> anyhow::Result<()> {
-        let handler = MessageHandler::new("h1", None, Arc::new(|_, _, _| {
+        let handler = MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| {
             Box::pin(async { Ok(()) })
         }));
         assert!(handler.rule.is_none());

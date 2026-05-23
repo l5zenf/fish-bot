@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use kameo::prelude::*;
@@ -8,12 +9,28 @@ use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use fish_core::message::{MessageChain, MessageSegment};
 use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
+use fish_plugin::plugin::RouteHint;
 
-/// Bot actor — receives MessageEvents and fans out to all PluginActors.
+/// A routing target resolved at startup — maps a route to a specific handler.
+struct RouteTarget {
+    plugin_ref: ActorRef<PluginActor>,
+    handler_id: String,
+}
+
+/// Bot actor — receives MessageEvents and dispatches to PluginActors
+/// via a pre-compiled routing table instead of scanning all plugins.
 #[derive(Actor)]
 pub struct Bot {
     adapter: Arc<dyn BaseAdapter>,
-    plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
+    /// Exact trimmed-text match — O(1) HashMap lookup.
+    exact_routes: HashMap<String, Vec<RouteTarget>>,
+    /// Handlers whose prefix was matched at routing time.
+    prefix_routes: Vec<(String, RouteTarget)>,
+    /// Handlers whose keyword was matched at routing time.
+    keyword_routes: Vec<(String, RouteTarget)>,
+    /// Handlers Bot cannot pre-filter (Regex / Fallback) — always dispatched.
+    /// PluginActor still checks the rule for these.
+    fallback_routes: Vec<RouteTarget>,
     ctx: Arc<Ctx>,
 }
 
@@ -23,9 +40,59 @@ impl Bot {
         plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
         ctx: Arc<Ctx>,
     ) -> Self {
+        let mut exact_routes: HashMap<String, Vec<RouteTarget>> = HashMap::new();
+        let mut prefix_routes = Vec::new();
+        let mut keyword_routes = Vec::new();
+        let mut fallback_routes = Vec::new();
+
+        // Build routing table from all plugins' handlers
+        for (plugin_ref, plugin) in &plugin_refs {
+            for handler in plugin.message_handlers() {
+                let target = RouteTarget {
+                    plugin_ref: plugin_ref.clone(),
+                    handler_id: handler.id.clone(),
+                };
+                match &handler.route {
+                    RouteHint::Exact(patterns) => {
+                        for pattern in patterns {
+                            exact_routes
+                                .entry(pattern.clone())
+                                .or_default()
+                                .push(RouteTarget {
+                                    plugin_ref: plugin_ref.clone(),
+                                    handler_id: handler.id.clone(),
+                                });
+                        }
+                    }
+                    RouteHint::Prefix(patterns) => {
+                        for pattern in patterns {
+                            prefix_routes.push((pattern.clone(), RouteTarget {
+                                plugin_ref: plugin_ref.clone(),
+                                handler_id: handler.id.clone(),
+                            }));
+                        }
+                    }
+                    RouteHint::Keyword(patterns) => {
+                        for pattern in patterns {
+                            keyword_routes.push((pattern.clone(), RouteTarget {
+                                plugin_ref: plugin_ref.clone(),
+                                handler_id: handler.id.clone(),
+                            }));
+                        }
+                    }
+                    RouteHint::Regex | RouteHint::Fallback => {
+                        fallback_routes.push(target);
+                    }
+                }
+            }
+        }
+
         Self {
             adapter,
-            plugin_refs,
+            exact_routes,
+            prefix_routes,
+            keyword_routes,
+            fallback_routes,
             ctx,
         }
     }
@@ -67,17 +134,46 @@ impl Message<DispatchEvent> for Bot {
         let adapter = Arc::clone(&self.adapter);
         let ctx = Arc::clone(&self.ctx);
 
-        // Fan out to plugin actors — pre-filter by Plugin::supports() to skip
-        // plugins whose rules can't match, avoiding unnecessary actor dispatch.
-        for (plugin_ref, plugin) in &self.plugin_refs {
-            if !plugin.supports(&event) {
-                continue;
+        // Route the event using the pre-compiled routing table.
+        let text = event.plain_text();
+        let trimmed = text.trim().to_string();
+
+        let mut targets: Vec<(ActorRef<PluginActor>, String)> = Vec::new();
+
+        // 1. Exact match — O(1) HashMap lookup
+        if let Some(hits) = self.exact_routes.get(&trimmed) {
+            for t in hits {
+                targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
             }
+        }
+
+        // 2. Prefix match
+        for (prefix, t) in &self.prefix_routes {
+            if text.starts_with(prefix) {
+                targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
+            }
+        }
+
+        // 3. Keyword match
+        for (kw, t) in &self.keyword_routes {
+            if text.contains(kw) {
+                targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
+            }
+        }
+
+        // 4. Fallback/Regex — always dispatch, PluginActor checks rule
+        for t in &self.fallback_routes {
+            targets.push((t.plugin_ref.clone(), t.handler_id.clone()));
+        }
+
+        // Dispatch each target
+        for (plugin_ref, handler_id) in targets {
             let _ = plugin_ref
                 .tell(HandleEvent {
                     event: event.clone(),
                     adapter: Arc::clone(&adapter),
                     ctx: Arc::clone(&ctx),
+                    handler_id: Some(handler_id),
                 })
                 .await;
         }
@@ -90,7 +186,7 @@ mod tests {
     use async_trait::async_trait;
     use fish_adapter::adapter::BaseAdapter;
     use fish_core::error::{AppError, Result};
-    use fish_core::rule::{is_fullmatch};
+    use fish_core::rule::is_fullmatch;
     use fish_plugin::plugin::{MessageHandler, Plugin, PluginMetadata};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use kameo::actor::Spawn;
@@ -115,7 +211,7 @@ mod tests {
     fn make_counter_plugin(count: Arc<AtomicUsize>) -> CounterPlugin {
         CounterPlugin {
             meta: PluginMetadata { id: "counter".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("counter", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("counter", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
                 let c = Arc::clone(&count);
                 Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); Ok(()) })
             }))],
@@ -135,7 +231,8 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
         let bot = Bot::new(adapter, vec![], ctx);
-        assert!(bot.plugin_refs.is_empty());
+        assert!(bot.exact_routes.is_empty());
+        assert!(bot.fallback_routes.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -169,7 +266,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(EchoPlugin {
             meta: PluginMetadata { id: "echo".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("echo", None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("echo", RouteHint::Fallback, None, Arc::new(|event, _, _| {
                 let content = event.plain_text();
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text(content)).await;
@@ -255,7 +352,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin {
             meta: PluginMetadata { id: "reply".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("reply", None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("reply", RouteHint::Fallback, None, Arc::new(|event, _, _| {
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text("reply")).await;
                     Ok(())
@@ -279,6 +376,9 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
 
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
+        let ctx = Arc::new(Ctx::new());
+
         struct SelectivePlugin {
             meta: PluginMetadata,
             handlers: Vec<MessageHandler>,
@@ -288,12 +388,11 @@ mod tests {
             fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
         }
 
-        let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
-        let ctx = Arc::new(Ctx::new());
-
+        // Use a catch-all route (no exact match) to test that PluginActor
+        // still checks the handler's rule on /skip
         let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin {
             meta: PluginMetadata { id: "selective".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("selective", Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("selective", RouteHint::Fallback, Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -343,7 +442,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin {
             meta: PluginMetadata { id: "multi_reply".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("multi_reply", None, Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("multi_reply", RouteHint::Fallback, None, Arc::new(|event, _, _| {
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text("multi segment reply")).await;
                     Ok(())

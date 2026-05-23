@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use kameo::prelude::*;
@@ -7,7 +8,7 @@ use tokio::sync::Semaphore;
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
-use crate::plugin::Plugin;
+use crate::plugin::{MessageHandler, Plugin, RouteHint};
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
@@ -15,24 +16,37 @@ use crate::plugin::Plugin;
 #[derive(Actor)]
 pub struct PluginActor {
     plugin: Arc<dyn Plugin>,
+    /// Handler id → index into plugin.message_handlers() for O(1) lookup.
+    handler_index: HashMap<String, usize>,
     semaphore: Arc<Semaphore>,
 }
 
 impl PluginActor {
     /// Create a new PluginActor with a default max concurrency of 64.
     pub fn new(plugin: Arc<dyn Plugin>) -> Self {
+        let handler_index = plugin
+            .message_handlers()
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.id.clone(), i))
+            .collect();
         Self {
             plugin,
+            handler_index,
             semaphore: Arc::new(Semaphore::new(64)),
         }
     }
 }
 
 /// Handle a message event — fanned out by BotActor with shared deps.
+/// When `handler_id` is set, only that specific handler is executed
+/// and rule checking is skipped (Bot already verified via routing table).
+/// When `handler_id` is None, all handlers are scanned with rule checks (fallback).
 pub struct HandleEvent {
     pub event: MessageEvent,
     pub adapter: Arc<dyn BaseAdapter>,
     pub ctx: Arc<Ctx>,
+    pub handler_id: Option<String>,
 }
 
 impl Message<HandleEvent> for PluginActor {
@@ -45,17 +59,46 @@ impl Message<HandleEvent> for PluginActor {
     ) -> Self::Reply {
         let plugin_id = self.plugin.metadata().id.clone();
 
-        for handler in self.plugin.message_handlers() {
-            // Check rule — if rule exists and doesn't match, skip this handler
-            let matched = match &handler.rule {
-                Some(rule) => rule.check(&msg.event),
-                None => true,
-            };
+        // Determine which handlers to execute based on routing mode.
+        // Bot-routed (handler_id set): find by index, skip rule check.
+        // Fallback (handler_id=None): scan all handlers with rule checks.
+        let handlers = self.plugin.message_handlers();
 
-            if !matched {
-                continue;
+        let matched_handlers: Vec<&MessageHandler> = match &msg.handler_id {
+            Some(hid) => {
+                // Bot-routed to a specific handler
+                match self.handler_index.get(hid).and_then(|&idx| handlers.get(idx)) {
+                    Some(handler) => {
+                        // For exact/prefix/keyword routes, Bot verified the match — skip rule.
+                        // For regex/fallback routes, Bot cannot pre-filter — check the rule.
+                        let matched = match handler.route {
+                            RouteHint::Exact(_) | RouteHint::Prefix(_) | RouteHint::Keyword(_) => {
+                                true
+                            }
+                            RouteHint::Regex | RouteHint::Fallback => match &handler.rule {
+                                Some(rule) => rule.check(&msg.event),
+                                None => true,
+                            },
+                        };
+                        if matched {
+                            vec![handler]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    None => vec![],
+                }
             }
+            None => handlers
+                .iter()
+                .filter(|h| match &h.rule {
+                    Some(rule) => rule.check(&msg.event),
+                    None => true,
+                })
+                .collect(),
+        };
 
+        for handler in matched_handlers {
             // Try to acquire a semaphore permit before spawning.
             // If the plugin is at capacity, drop the event with a warning
             // instead of queuing unbounded tasks.
@@ -73,8 +116,8 @@ impl Message<HandleEvent> for PluginActor {
 
             let func = handler.func.clone();
             let handler_id = handler.id.clone();
-            let handler_timeout = handler.timeout;
             let plugin_id = plugin_id.clone();
+            let handler_timeout = handler.timeout;
             let event = msg.event.clone();
             let adapter = Arc::clone(&msg.adapter);
             let ctx = Arc::clone(&msg.ctx);
@@ -122,7 +165,7 @@ impl Message<HandleEvent> for PluginActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{MessageHandler, Plugin, PluginMetadata};
+    use crate::plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
     use fish_core::event::MessageEvent;
     use fish_core::message::{MessageChain, MessageSegment};
     use fish_adapter::adapter::BaseAdapter;
@@ -152,7 +195,7 @@ mod tests {
     fn make_test_plugin() -> TestPlugin {
         TestPlugin {
             meta: PluginMetadata { id: "test".into(), name: "test".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("ping", Some(is_fullmatch(["/ping"])), Arc::new(|event, _, _| {
+            handlers: vec![MessageHandler::new("ping", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(|event, _, _| {
                 let reply = event.plain_text();
                 Box::pin(async move {
                     let _ = event.reply(MessageSegment::text(reply)).await;
@@ -189,7 +232,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
             meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("flag", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -199,7 +242,7 @@ mod tests {
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(called.load(Ordering::SeqCst));
@@ -221,7 +264,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(FlagPlugin {
             meta: PluginMetadata { id: "flag".into(), name: "".into(), description: "".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("flag", Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("flag", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new(move |_, _, _| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -231,7 +274,7 @@ mod tests {
         let mut event = make_event("/pong");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst));
@@ -250,14 +293,14 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(NoRulePlugin {
             meta: PluginMetadata { id: "norule".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -274,7 +317,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(PanicPlugin {
             meta: PluginMetadata { id: "panic".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("panic", None, Arc::new(|_, _, _| {
+            handlers: vec![MessageHandler::new("panic", RouteHint::Fallback, None, Arc::new(|_, _, _| {
                 Box::pin(async { std::panic::panic_any("intentional panic") })
             }))],
         });
@@ -283,7 +326,7 @@ mod tests {
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
@@ -304,15 +347,15 @@ mod tests {
         let plugin: Arc<dyn Plugin> = Arc::new(MultiHandlerPlugin {
             meta: PluginMetadata { id: "multi".into(), ..Default::default() },
             handlers: vec![
-                MessageHandler::new("h1", None, Arc::new({
+                MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
                     move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
-                MessageHandler::new("h2", None, Arc::new({
+                MessageHandler::new("h2", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
                     move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
-                MessageHandler::new("h3", None, Arc::new({
+                MessageHandler::new("h3", RouteHint::Fallback, None, Arc::new({
                     let c = Arc::clone(&count);
                     move |_, _, _| { let c2 = Arc::clone(&c); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
@@ -323,7 +366,7 @@ mod tests {
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "all 3 handlers should execute");
         Ok(())
@@ -345,7 +388,7 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(SkipPlugin {
             meta: PluginMetadata { id: "skip".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("skip", Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("skip", RouteHint::Exact(vec!["/run".into()]), Some(is_fullmatch(["/run"])), Arc::new(move |_, _, _| {
                 let f = Arc::clone(&called_clone);
                 Box::pin(async move { f.store(true, Ordering::SeqCst); Ok(()) })
             }))],
@@ -355,7 +398,7 @@ mod tests {
         let mut event = make_event("/skip");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(!called.load(Ordering::SeqCst), "handler should not be called when rule doesn't match");
         Ok(())
@@ -383,7 +426,7 @@ mod tests {
         let au = Arc::clone(&adapter_used);
         let plugin: Arc<dyn Plugin> = Arc::new(DepsPlugin {
             meta: PluginMetadata { id: "deps".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("deps", None, Arc::new(move |_, adapter, handler_ctx| {
+            handlers: vec![MessageHandler::new("deps", RouteHint::Fallback, None, Arc::new(move |_, adapter, handler_ctx| {
                 let cc = Arc::clone(&cu);
                 let ac = Arc::clone(&au);
                 Box::pin(async move {
@@ -401,7 +444,7 @@ mod tests {
         let mut event = make_event("check");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx, handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         assert!(ctx_used.load(Ordering::SeqCst), "ctx should be passed and accessible");
         assert!(adapter_used.load(Ordering::SeqCst), "adapter should be passed and callable");
@@ -421,7 +464,7 @@ mod tests {
         let mut event = make_event("anything");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -443,15 +486,15 @@ mod tests {
         let plugin: Arc<dyn Plugin> = Arc::new(MixedPlugin {
             meta: PluginMetadata { id: "mixed".into(), ..Default::default() },
             handlers: vec![
-                MessageHandler::new("ping_rule", Some(is_fullmatch(["/ping"])), Arc::new({
+                MessageHandler::new("ping_rule", RouteHint::Exact(vec!["/ping".into()]), Some(is_fullmatch(["/ping"])), Arc::new({
                     let count = Arc::clone(&c);
                     move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) }) }
                 })),
-                MessageHandler::new("pong_rule", Some(is_fullmatch(["/pong"])), Arc::new({
+                MessageHandler::new("pong_rule", RouteHint::Exact(vec!["/pong".into()]), Some(is_fullmatch(["/pong"])), Arc::new({
                     let count = Arc::clone(&c);
                     move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); Ok(()) }) }
                 })),
-                MessageHandler::new("catchall", None, Arc::new({
+                MessageHandler::new("catchall", RouteHint::Fallback, None, Arc::new({
                     let count = Arc::clone(&c);
                     move |_, _, _| { let c2 = Arc::clone(&count); Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); Ok(()) }) }
                 })),
@@ -462,7 +505,7 @@ mod tests {
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         assert_eq!(call_count.load(Ordering::SeqCst), 101, "only matching rule and no-rule handlers should execute");
         Ok(())
@@ -478,14 +521,14 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(NamedPlugin {
             meta: PluginMetadata { id: "named".into(), name: "TestName".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
@@ -503,7 +546,7 @@ mod tests {
         let c = Arc::clone(&counter);
         let plugin: Arc<dyn Plugin> = Arc::new(CountPlugin {
             meta: PluginMetadata { id: "count".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("count", None, Arc::new(move |_, _, _| {
+            handlers: vec![MessageHandler::new("count", RouteHint::Fallback, None, Arc::new(move |_, _, _| {
                 let c2 = Arc::clone(&c);
                 Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); Ok(()) })
             }))],
@@ -513,7 +556,7 @@ mod tests {
         for _ in 0..3 {
             let mut event = make_event("test");
             event.set_callback(|_| Box::pin(async {}));
-            let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+            let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -531,14 +574,14 @@ mod tests {
 
         let plugin: Arc<dyn Plugin> = Arc::new(CustomMetaPlugin {
             meta: PluginMetadata { id: "custom_meta".into(), name: "元数据测试".into(), ..Default::default() },
-            handlers: vec![MessageHandler::new("h1", None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
+            handlers: vec![MessageHandler::new("h1", RouteHint::Fallback, None, Arc::new(|_, _, _| Box::pin(async { Ok(()) })))],
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         let mut event = make_event("test");
         event.set_callback(|_| Box::pin(async {}));
 
-        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()) }).await;
+        let _ = actor_ref.tell(HandleEvent { event, adapter: Arc::new(MockAdapter), ctx: Arc::new(Ctx::new()), handler_id: None }).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         Ok(())
     }
