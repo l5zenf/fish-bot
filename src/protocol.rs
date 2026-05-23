@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crate::error::{AppError, Result};
 use crate::model::Message;
 use serde_json::Value;
@@ -44,7 +45,7 @@ pub fn encode_message(msg: &Message) -> Result<Value> {
             }
         })),
         Message::Custom { segments } => {
-            let data = base64::encode(serde_json::to_string(&segments.iter().map(|s| {
+            let data = STANDARD.encode(serde_json::to_string(&segments.iter().map(|s| {
                 match s {
                     Message::Text { text } => serde_json::json!({"type":"text","text":text}),
                     Message::Image { url, .. } => serde_json::json!({"type":"image","image_url":url}),
@@ -106,7 +107,7 @@ pub fn decode_message(payload: &Value) -> Result<Message> {
         },
         101 => {
             let data_b64 = payload["custom"]["data"].as_str().unwrap_or("");
-            let decoded = base64::decode(data_b64)?;
+            let decoded = STANDARD.decode(data_b64)?;
             let segments: Vec<Value> = serde_json::from_slice(&decoded)?;
             let messages = segments.into_iter().map(|v| {
                 match v["type"].as_str().unwrap_or("") {
