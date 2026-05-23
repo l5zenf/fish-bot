@@ -28,35 +28,49 @@ RUST_LOG=info,reqwest=warn,tungstenite=warn cargo run -p fish-bot
 ## 写一个插件
 
 ```rust
+use std::sync::Arc;
 use fish_core::event::MessageEvent;
 use fish_core::message::MessageSegment;
 use fish_core::rule::is_fullmatch;
 use fish_core::ctx::Ctx;
 use fish_adapter::adapter::BaseAdapter;
 use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler};
-use std::sync::Arc;
 
-pub struct MyPlugin;
+pub struct MyPlugin {
+    metadata: PluginMetadata,
+    handlers: Vec<MessageHandler>,
+}
 
-impl Plugin for MyPlugin {
-    fn metadata(&self) -> PluginMetadata {
-        PluginMetadata {
-            id: "my_plugin".into(),
-            name: "我的插件".into(),
-            description: "一个简单的 demo 插件".into(),
-            ..Default::default()
+impl MyPlugin {
+    pub fn new() -> Self {
+        Self {
+            metadata: PluginMetadata {
+                id: "my_plugin".into(),
+                name: "我的插件".into(),
+                description: "一个简单的 demo 插件".into(),
+                ..Default::default()
+            },
+            handlers: vec![MessageHandler::new(
+                "ping",                                    // handler id（日志用）
+                Some(is_fullmatch(["/ping"])),             // 匹配规则
+                Arc::new(|event, _adapter, _ctx| {
+                    Box::pin(async move {
+                        event.reply(MessageSegment::text("pong")).await;
+                        Ok(())
+                    })
+                }),
+            )],
         }
     }
+}
 
-    fn message_handlers(&self) -> Vec<MessageHandler> {
-        vec![MessageHandler {
-            func: Arc::new(|event, _adapter, _ctx| {
-                Box::pin(async move {
-                    let _ = event.reply(MessageSegment::text("pong")).await;
-                })
-            }),
-            rule: Some(is_fullmatch(["/ping"])),
-        }]
+impl Plugin for MyPlugin {
+    fn metadata(&self) -> &PluginMetadata {
+        &self.metadata
+    }
+
+    fn message_handlers(&self) -> &[MessageHandler] {
+        &self.handlers
     }
 }
 ```
@@ -64,7 +78,7 @@ impl Plugin for MyPlugin {
 在 `main.rs` 注册：
 
 ```rust
-fish_plugin::plugin::register_plugin(MyPlugin);
+fish_plugin::plugin::register_plugin(MyPlugin::new());
 ```
 
 ## 规则组合
