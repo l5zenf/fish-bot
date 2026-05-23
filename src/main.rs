@@ -1,9 +1,24 @@
-pub mod adapter;
-pub mod error;
-pub mod model;
-pub mod plugin;
-pub mod protocol;
+mod error;
+mod model;
+mod protocol;
+mod adapter;
+mod plugin;
 
-fn main() {
-    println!("Hello fish-bot");
+use adapter::BaseAdapter;
+use adapter::fish::FishWebSocketAdapter;
+use plugin::echo::EchoPlugin;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
+    let adapter = Arc::new(FishWebSocketAdapter::new()) as Arc<dyn BaseAdapter>;
+
+    plugin::register_plugin(EchoPlugin);
+    tracing::info!("FishBot starting...");
+
+    adapter.run().await?;
+
+    Ok(())
 }
