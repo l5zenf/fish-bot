@@ -5,6 +5,7 @@
 ## 特性
 
 - **actor 隔离** — 每个插件独立 kameo actor，panic 不扩散，慢插件不阻塞快插件
+- **路由表派发** — Bot 启动时预编译路由表，exact 命令 O(1) 查表直达 handler，不扫全部插件
 - **规则引擎** — 组合式规则匹配（前缀/全匹配/关键词/正则 + and/or）
 - **依赖注入** — `Ctx` 容器按类型存取，handler 签名统一拿到 `(event, adapter, ctx)`
 - **零 unwrap** — `parking_lot` 无锁中毒，`snafu` 结构化错误，无隐式 `From`
@@ -34,7 +35,7 @@ use fish_core::message::MessageSegment;
 use fish_core::rule::is_fullmatch;
 use fish_core::ctx::Ctx;
 use fish_adapter::adapter::BaseAdapter;
-use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler};
+use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler, RouteHint};
 
 pub struct MyPlugin {
     metadata: PluginMetadata,
@@ -52,6 +53,7 @@ impl MyPlugin {
             },
             handlers: vec![MessageHandler::new(
                 "ping",                                    // handler id（日志用）
+                RouteHint::Exact(vec!["/ping".into()]),    // 路由提示（Bot 预编译路由表）
                 Some(is_fullmatch(["/ping"])),             // 匹配规则
                 Arc::new(|event, _adapter, _ctx| {
                     Box::pin(async move {
@@ -79,6 +81,31 @@ impl Plugin for MyPlugin {
 
 ```rust
 fish_plugin::plugin::register_plugin(MyPlugin::new());
+```
+
+## 路由提示
+
+每个 `MessageHandler` 需要指定 `RouteHint`，告诉 Bot 如何索引这个 handler。Bot 启动时预编译路由表，消息到达时 O(1) 查表直达 handler，不再遍历所有插件。
+
+```rust
+pub enum RouteHint {
+    Exact(Vec<String>),   // 精确匹配，Bot 用 HashMap 索引
+    Prefix(Vec<String>),  // 前缀匹配，Bot 遍历前缀列表
+    Keyword(Vec<String>), // 关键词匹配，Bot 遍历关键词列表
+    Regex,                // 正则匹配，Bot 无法预过滤，由 PluginActor 检查规则
+    Fallback,             // 无条件派发，Bot 总是转发给 PluginActor，规则交 PluginActor 检查
+}
+```
+
+`RouteHint` 应与 `Rule` 一致。例如 `/ping` 用 `is_fullmatch` → `RouteHint::Exact`，Bot 验证后跳过 PluginActor 的重复规则检查。
+
+```rust
+// RouteHint 与 Rule 对应关系：
+is_fullmatch("/ping")      → RouteHint::Exact(["ping"])
+is_startswith("/admin")    → RouteHint::Prefix(["/admin"])
+is_keywords("delete")      → RouteHint::Keyword(["delete"])
+is_regex("...")            → RouteHint::Regex
+                        → RouteHint::Fallback  // 无规则或复杂组合
 ```
 
 ## 规则组合
