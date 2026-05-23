@@ -154,4 +154,33 @@ mod tests {
         assert!(!mgr.is_empty());
         Ok(())
     }
+
+    #[test]
+    fn t2_28_plugin_manager_default() -> anyhow::Result<()> {
+        let mgr = PluginManager::default();
+        assert_eq!(mgr.len(), 0);
+        assert!(mgr.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn t2_29_load_all_plugins_twice() -> anyhow::Result<()> {
+        struct OncePlugin;
+        impl Plugin for OncePlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "load_twice".into(), name: "Once".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+
+        register_plugin(OncePlugin);
+        let mut mgr = PluginManager::new();
+        mgr.load_all_plugins();
+        let count_after_first = mgr.len();
+
+        // Load again — should skip duplicates
+        mgr.load_all_plugins();
+        assert_eq!(mgr.len(), count_after_first, "loading twice should not add duplicates");
+        Ok(())
+    }
 }

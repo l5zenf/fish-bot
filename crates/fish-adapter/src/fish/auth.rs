@@ -391,4 +391,177 @@ mod tests {
         assert_eq!(dir, PathBuf::from("data"));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn t3_48_qrcode_login_returns_err() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let mut auth = AuthManager::test_new(dir);
+        let result = auth.qrcode_login().await;
+        assert!(result.is_err(), "qrcode_login should return error (not implemented)");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_49_refresh_if_needed_returns_ok() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let mut auth = AuthManager::test_new(dir);
+        let result = auth.refresh_if_needed().await;
+        assert!(result.is_ok(), "refresh_if_needed should return Ok(())");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_50_clone_preserves_cookies() -> anyhow::Result<()> {
+        let auth = AuthManager {
+            client: reqwest::Client::new(),
+            cookies: Arc::new(Mutex::new([("unb".into(), "clone_test".into())].into())),
+            device_id: "dev123".into(),
+            data_dir: PathBuf::from("/tmp"),
+        };
+        let cloned = auth.clone();
+        assert_eq!(cloned.device_id(), "dev123");
+        let cookies = cloned.get_cookies().await;
+        assert_eq!(cookies.get("unb"), Some(&"clone_test".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_51_load_cookies_from_env_happy() -> anyhow::Result<()> {
+        let test_cookies: HashMap<String, String> = [("unb".into(), "env_user".into())].into();
+        let json = serde_json::to_string(&test_cookies)?;
+        unsafe { std::env::set_var("FISH_AUTH_JSON", &json); }
+        let result = AuthManager::load_cookies_from_env();
+        unsafe { std::env::remove_var("FISH_AUTH_JSON"); }
+        match result {
+            Some(cookies) => assert_eq!(cookies.get("unb"), Some(&"env_user".to_string())),
+            None => assert!(false, "should load cookies from env"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_52_load_cookies_from_env_corrupted() {
+        unsafe { std::env::set_var("FISH_AUTH_JSON", "not valid json"); }
+        let result = AuthManager::load_cookies_from_env();
+        unsafe { std::env::remove_var("FISH_AUTH_JSON"); }
+        assert!(result.is_none(), "corrupted env var should return None");
+    }
+
+    #[tokio::test]
+    async fn t3_53_load_cookies_from_file_nonexistent() -> anyhow::Result<()> {
+        let result = AuthManager::load_cookies_from_file(&PathBuf::from("/tmp/nonexistent_cookie_dir_xyz"));
+        assert!(result.is_none(), "nonexistent file should return None");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_54_auth_manager_clone_device_id_same() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let auth = AuthManager::test_new(dir);
+        let device_id = auth.device_id();
+        let cloned = auth.clone();
+        assert_eq!(cloned.device_id(), device_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_55_from_local_or_qr_login_returns_ok() -> anyhow::Result<()> {
+        let result = AuthManager::from_local_or_qr_login().await;
+        assert!(result.is_ok(), "from_local_or_qr_login should return Ok");
+        let auth = result?;
+        let cookies = auth.get_cookies().await;
+        // Should have loaded from env or file, or be empty
+        let _ = cookies.len(); // just verify it doesn't crash
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_56_load_cookies_from_file_empty_json() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let auth_path = dir.join("fish_auth.json");
+        std::fs::write(&auth_path, "{}")?;
+        let result = AuthManager::load_cookies_from_file(&dir);
+        if let Some(cookies) = result {
+            assert!(cookies.is_empty(), "empty JSON should yield empty cookies");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_57_default_auth_manager() -> anyhow::Result<()> {
+        let auth = AuthManager::default();
+        assert!(!auth.device_id().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_58_new_auth_loads_from_default() -> anyhow::Result<()> {
+        // AuthManager::new() should not panic in any environment
+        let auth = AuthManager::new();
+        let device_id = auth.device_id();
+        assert!(!device_id.is_empty());
+        let cookies = auth.get_cookies().await;
+        let _ = cookies.len();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_59_auth_file_path_matches_data_dir() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let auth = AuthManager::test_new(dir.clone());
+        let path = auth.auth_file_path();
+        assert_eq!(path, dir.join("fish_auth.json"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_60_rm_auth_file_nonexistent() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let auth = AuthManager::test_new(dir.clone());
+        // Removing non-existent file should not panic
+        auth.rm_auth_file().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_61_save_to_readonly_dir() -> anyhow::Result<()> {
+        // Test saving when directory can't be created (e.g. a file exists at path)
+        let dir = temp_auth_dir()?;
+        let file_path = dir.join("fish_auth.json");
+        // Create a file where the directory should be (edge case)
+        std::fs::write(&file_path, "{}")?;
+        // Try to save — this would create parent dirs if file_path parent didn't exist
+        let auth = AuthManager {
+            client: reqwest::Client::new(),
+            cookies: Arc::new(Mutex::new(HashMap::new())),
+            device_id: "dev".into(),
+            data_dir: file_path.clone(), // data_dir is a file, not a dir
+        };
+        // This should handle the error gracefully (parent of fish_auth.json is a file)
+        auth.save_cookies_to_file().await;
+        // Clean up
+        let _ = std::fs::remove_file(&file_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_62_load_cookies_from_dir_instead_of_file() -> anyhow::Result<()> {
+        // When the auth file path is a directory instead of a file
+        let dir = temp_auth_dir()?;
+        let auth_file = dir.join("fish_auth.json");
+        // Create a directory where the auth file should be
+        std::fs::create_dir_all(&auth_file)?;
+        let _result = AuthManager::load_cookies_from_file(&dir);
+        std::fs::remove_dir(&auth_file)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_63_load_cookies_without_env() -> anyhow::Result<()> {
+        // Ensure env var is not set
+        unsafe { std::env::remove_var("FISH_AUTH_JSON"); }
+        let result = AuthManager::load_cookies_from_env();
+        assert!(result.is_none(), "should return None when env var is not set");
+        Ok(())
+    }
 }

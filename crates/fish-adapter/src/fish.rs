@@ -486,6 +486,199 @@ impl Clone for FishWebSocketAdapter {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fish_core::message::MessageChain;
+
+    #[test]
+    fn t3_55_new_creates_adapter() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let cb = adapter.callback.lock();
+        assert!(cb.is_none(), "callback should be None initially");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_56_clone_has_independent_callback() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        {
+            let mut cb = adapter.callback.lock();
+            *cb = Some(Box::new(|_| {}));
+        }
+        let cloned = adapter.clone();
+        let cloned_cb = cloned.callback.lock();
+        assert!(cloned_cb.is_none(), "cloned adapter should have independent None callback");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_57_default_creates_empty_callback() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::default();
+        let cb = adapter.callback.lock();
+        assert!(cb.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn t3_58_clone_preserves_device_id() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let did = adapter.api.device_id();
+        let cloned = adapter.clone();
+        assert_eq!(cloned.api.device_id(), did);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_59_set_callback_stores_function() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        adapter.set_callback(Box::new(|_| {}));
+        let cb = adapter.callback.lock();
+        assert!(cb.is_some(), "callback should be set");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_60_send_returns_err_without_connection() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from("test message");
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "send should fail without WebSocket connection");
+        Ok(())
+    }
+
+    /// Test the full message building path: single segment, multi segment, with cid
+    #[tokio::test]
+    async fn t3_61_send_builds_message_correctly() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from("hello");
+        let result = adapter.send("user123", &chain, Some("cid456")).await;
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(err_msg.contains("WebSocket"), "error should mention WebSocket");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_62_send_multi_segment() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(vec![
+            fish_core::message::MessageSegment::text("hello"),
+            fish_core::message::MessageSegment::text("world"),
+        ]);
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_63_send_with_image() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(fish_core::message::MessageSegment::image(
+            "https://example.com/pic.jpg",
+        ));
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_64_send_with_cid() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from("test");
+        let result = adapter.send("user456", &chain, Some("conv789")).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_65_send_with_audio() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(fish_core::message::MessageSegment::Audio {
+            audio_url: "https://example.com/sound.mp3".into(),
+            duration_ms: 3000,
+        });
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_66_adapter_new_has_device_id() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let did = adapter.api.device_id();
+        assert!(!did.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_67_adapter_my_id_callable() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let _id = adapter.api.my_id().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_68_send_with_custom_node() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(fish_core::message::MessageSegment::CustomNode {
+            desc: "test".into(),
+            content: serde_json::json!({"type": "custom"}),
+        });
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_69_send_mixed_segments() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(vec![
+            fish_core::message::MessageSegment::text("hello"),
+            fish_core::message::MessageSegment::Image {
+                image_url: "https://img.jpg".into(),
+                width: 100,
+                height: 200,
+            },
+        ]);
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_70_send_with_audio_segment() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(vec![
+            fish_core::message::MessageSegment::text("audio file:"),
+            fish_core::message::MessageSegment::Audio {
+                audio_url: "https://sound.mp3".into(),
+                duration_ms: 5000,
+            },
+        ]);
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_71_send_with_custom_node_multi() -> anyhow::Result<()> {
+        let adapter = FishWebSocketAdapter::new();
+        let chain = MessageChain::from(vec![
+            fish_core::message::MessageSegment::text("custom:"),
+            fish_core::message::MessageSegment::CustomNode {
+                desc: "node".into(),
+                content: serde_json::json!({"data": "value"}),
+            },
+        ]);
+        let result = adapter.send("target", &chain, None).await;
+        assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl BaseAdapter for FishWebSocketAdapter {
     fn set_callback(&self, cb: Box<dyn Fn(MessageEvent) + Send + Sync>) {

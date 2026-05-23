@@ -199,4 +199,95 @@ mod tests {
         assert!(handler_no_rule.rule.is_none());
         Ok(())
     }
+
+    #[test]
+    fn t2_32_plugin_with_event_handlers() -> anyhow::Result<()> {
+        struct EventPlugin;
+        impl Plugin for EventPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "event_test".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+            fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
+                let mut map = HashMap::new();
+                map.insert("notice".into(), vec![EventHandler {
+                    func: Arc::new(|_, _, _| Box::pin(async {})),
+                    rule: None,
+                }]);
+                map
+            }
+        }
+
+        let plugin = EventPlugin;
+        let handlers = plugin.event_handlers();
+        assert_eq!(handlers.len(), 1);
+        assert!(handlers.contains_key("notice"));
+        Ok(())
+    }
+
+    #[test]
+    fn t2_33_plugin_metadata_full() -> anyhow::Result<()> {
+        let meta = PluginMetadata {
+            id: "custom".into(),
+            name: "Custom".into(),
+            description: "desc".into(),
+            version: "2.0.0".into(),
+            author: "tester".into(),
+        };
+        assert_eq!(meta.id, "custom");
+        assert_eq!(meta.name, "Custom");
+        assert_eq!(meta.description, "desc");
+        assert_eq!(meta.version, "2.0.0");
+        assert_eq!(meta.author, "tester");
+        Ok(())
+    }
+
+    #[test]
+    fn t2_34_register_plugin_increases_registry() -> anyhow::Result<()> {
+        struct RegPlugin;
+        impl Plugin for RegPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "reg_check".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+        }
+
+        let before = registered_plugins().len();
+        register_plugin(RegPlugin);
+        let after = registered_plugins().len();
+        assert!(after >= before + 1, "registry should have grown");
+        Ok(())
+    }
+
+    #[test]
+    fn t2_35_plugin_metadata_clone() -> anyhow::Result<()> {
+        let meta = PluginMetadata {
+            id: "clone_test".into(),
+            name: "Clone".into(),
+            description: "desc".into(),
+            version: "3.0".into(),
+            author: "author".into(),
+        };
+        let cloned = meta.clone();
+        assert_eq!(cloned.id, meta.id);
+        assert_eq!(cloned.name, meta.name);
+        assert_eq!(cloned.version, meta.version);
+        Ok(())
+    }
+
+    #[test]
+    fn t2_36_plugin_metadata_debug() -> anyhow::Result<()> {
+        let meta = PluginMetadata::default();
+        let debug_str = format!("{:?}", meta);
+        assert!(debug_str.contains("PluginMetadata"), "debug should contain struct name");
+        Ok(())
+    }
+
+    #[test]
+    fn t2_37_message_handler_without_rule() -> anyhow::Result<()> {
+        let handler = MessageHandler {
+            func: Arc::new(|_, _, _| Box::pin(async {})),
+            rule: None,
+        };
+        assert!(handler.rule.is_none());
+        Ok(())
+    }
 }

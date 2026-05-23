@@ -518,7 +518,7 @@ impl Clone for FishAPI {
 impl BaseAPI for FishAPI {}
 
 /// Simple URL encoder for form bodies.
-fn urlencoding(input: &str) -> String {
+pub fn urlencoding(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
@@ -532,4 +532,146 @@ fn urlencoding(input: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t3_42_urlencoding_alphanumeric() {
+        assert_eq!(urlencoding("hello123"), "hello123");
+        assert_eq!(urlencoding("ABC-DEF_ghi.~"), "ABC-DEF_ghi.~");
+    }
+
+    #[test]
+    fn t3_43_urlencoding_spaces() {
+        assert_eq!(urlencoding("hello world"), "hello%20world");
+        assert_eq!(urlencoding("a b c"), "a%20b%20c");
+    }
+
+    #[test]
+    fn t3_44_urlencoding_special_chars() {
+        let encoded = urlencoding("{\"key\":\"value\"}");
+        assert!(encoded.contains("%7B"));
+        assert!(encoded.contains("%22"));
+        assert!(encoded.contains("%3A"));
+        assert!(encoded.contains("%7D"));
+    }
+
+    #[test]
+    fn t3_45_urlencoding_empty() {
+        assert_eq!(urlencoding(""), "");
+    }
+
+    #[test]
+    fn t3_46_urlencoding_chinese() -> anyhow::Result<()> {
+        let encoded = urlencoding("你好");
+        assert!(!encoded.contains("你好"), "Chinese chars should be percent-encoded");
+        assert!(encoded.len() > 2, "encoded form should be longer than raw UTF-8");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_47_http_err_creates_app_error() -> anyhow::Result<()> {
+        // Force a connection error to get a reqwest::Error
+        if let Err(e) = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .timeout(std::time::Duration::from_millis(1))
+            .send()
+            .await
+        {
+            let app_err = http_err(e);
+            assert!(app_err.to_string().contains("HTTP"), "should contain HTTP");
+        }
+        Ok(())
+    }
+
+    // ---- FishAPI getter / constructor tests ----
+
+    fn test_auth() -> AuthManager {
+        AuthManager::new()
+    }
+
+    #[test]
+    fn t3_59_api_new_creates_with_device_id() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        assert!(!api.device_id().is_empty(), "device_id should be non-empty");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_60_api_cookies_str_does_not_panic() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        let _cookies = api.cookies_str().await;
+        // cookies may or may not be present depending on environment
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_61_api_my_id_does_not_panic() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        let _id = api.my_id().await;
+        // my_id may or may not be set depending on environment
+        Ok(())
+    }
+
+    #[test]
+    fn t3_62_api_clone_preserves_device_id() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        let did = api.device_id();
+        let cloned = api.clone();
+        assert_eq!(cloned.device_id(), did);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_63_api_clone_has_independent_poll_params() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        {
+            let mut pp = api.poll_params.lock().await;
+            *pp = Some([("key".into(), "val".into())].into());
+        }
+        let cloned = api.clone();
+        let cloned_pp = cloned.poll_params.lock().await;
+        assert!(cloned_pp.is_none(), "cloned api should have independent None poll_params");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_64_api_auth_returns_ref() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        let _auth: &AuthManager = api.auth();
+        Ok(())
+    }
+
+    #[test]
+    fn t3_65_api_new_with_fresh_auth() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        assert!(!api.device_id().is_empty());
+        // Verify we can create a second API with a different auth
+        let api2 = FishAPI::new(test_auth());
+        assert!(!api2.device_id().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_66_api_new_creates_client() -> anyhow::Result<()> {
+        let api = FishAPI::new(test_auth());
+        // Verify that poll_params is initialized to None
+        let pp = api.poll_params.lock().await;
+        assert!(pp.is_none(), "poll_params should be None initially");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_67_urlencoding_special_all() -> anyhow::Result<()> {
+        // Test all special characters that should be encoded
+        let encoded = urlencoding("!@#$%^&*()+=[]{}|;:',<>?/`\"");
+        // All these chars should be percent-encoded
+        assert!(!encoded.contains('!'));
+        assert!(!encoded.contains('@'));
+        assert!(!encoded.contains('#'));
+        Ok(())
+    }
 }

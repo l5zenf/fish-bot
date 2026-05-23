@@ -301,4 +301,52 @@ mod tests {
         assert!(!called.load(Ordering::SeqCst), "handler should not be called when rule doesn't match");
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t4_9_dispatch_reply_multi_segment() -> anyhow::Result<()> {
+        let recorded = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let recorded_clone = Arc::clone(&recorded);
+
+        struct RecordAdapter(Arc<tokio::sync::Mutex<String>>);
+        #[async_trait]
+        impl BaseAdapter for RecordAdapter {
+            fn set_callback(&self, _: Box<dyn Fn(MessageEvent) + Send + Sync>) {}
+            async fn send(&self, _target: &str, msg: &MessageChain, _cid: Option<&str>) -> Result<()> {
+                let mut guard = self.0.lock().await;
+                *guard = msg.summary();
+                Ok(())
+            }
+            async fn run(&self) -> Result<()> { Ok(()) }
+        }
+
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(RecordAdapter(recorded_clone));
+        let ctx = Arc::new(Ctx::new());
+
+        struct MultiReplyPlugin;
+        impl Plugin for MultiReplyPlugin {
+            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "multi_reply".into(), name: "".into(), description: "".into(), ..Default::default() } }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                vec![MessageHandler {
+                    func: Arc::new(|event, _, _| {
+                        Box::pin(async move {
+                            let _ = event.reply(MessageSegment::text("multi segment reply")).await;
+                        })
+                    }),
+                    rule: None,
+                }]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin);
+        let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+
+        let event = make_event("/test");
+        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let guard = recorded.lock().await;
+        assert_eq!(*guard, "multi segment reply");
+        Ok(())
+    }
 }

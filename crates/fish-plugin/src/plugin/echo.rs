@@ -188,4 +188,21 @@ mod tests {
         assert_eq!(*captured.lock(), "Echo: hello");
         Ok(())
     }
+
+    #[test]
+    fn t2_28_echo_default() -> anyhow::Result<()> {
+        let plugin = EchoPlugin::default();
+        let meta = plugin.metadata();
+        assert_eq!(meta.id, "echo");
+        Ok(())
+    }
+
+    #[test]
+    fn t2_29_echo_metadata_fields() -> anyhow::Result<()> {
+        let plugin = EchoPlugin::new();
+        let meta = plugin.metadata();
+        assert_eq!(meta.author, "Kaguya233qwq");
+        assert!(meta.description.contains("回声"));
+        Ok(())
+    }
 }

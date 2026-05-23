@@ -437,4 +437,138 @@ mod tests {
         assert!(matches!(&segs[0], MessageSegment::CustomNode { desc, .. } if desc == "未知消息"));
         Ok(())
     }
+
+    #[test]
+    fn t3_42_encode_chain_mixed_types() -> anyhow::Result<()> {
+        let chain = [
+            MessageSegment::text("hello"),
+            MessageSegment::Image { image_url: "pic.jpg".into(), width: 100, height: 200 },
+            MessageSegment::Audio { audio_url: "a.mp3".into(), duration_ms: 5000 },
+        ];
+        let (payload, ct) = encode_chain(&chain)?;
+        assert_eq!(ct, 2, "multi-segment should use custom type");
+        assert_eq!(payload["contentType"], 101);
+        let data = payload["custom"]["data"].as_str().ok_or_else(|| anyhow::anyhow!("missing data"))?;
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)?;
+        let parsed: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(parsed[0]["type"], "text");
+        assert_eq!(parsed[1]["type"], "image");
+        assert_eq!(parsed[2]["type"], "audio");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_43_decode_content_array_mixed() -> anyhow::Result<()> {
+        let arr = serde_json::json!([
+            {"contentType": 1, "text": {"text": "hi"}},
+            {"contentType": 1, "text": {"text": "there"}},
+        ]);
+        let segs = decode_content(&arr)?;
+        assert_eq!(segs.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_44_decode_system_tip_content() -> anyhow::Result<()> {
+        let payload = make_ct_payload(14, serde_json::json!({
+            "tip": {"tip": "test tip message"}
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::CustomNode { desc, content } = &decoded {
+            assert_eq!(desc, "系统提示");
+            assert_eq!(content["tip_text"], "test tip message");
+            assert_eq!(content["fish_type"], "system_tip");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_45_decode_fish_trade_card_content() -> anyhow::Result<()> {
+        let payload = make_ct_payload(26, serde_json::json!({
+            "dxCard": {
+                "item": {
+                    "main": {
+                        "exContent": {"title": "订单", "desc": "描述"},
+                        "clickParam": {"args": {"task_id": "task999"}}
+                    }
+                },
+                "button": {"text": "去查看", "targetUrl": "https://example.com?id=order123"}
+            }
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::CustomNode { desc, content } = &decoded {
+            assert_eq!(desc, "交易卡片");
+            assert_eq!(content["fish_type"], "fish_trade_card");
+            assert_eq!(content["order_id"], "order123");
+            assert_eq!(content["task_id"], "task999");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_46_decode_item_card_content() -> anyhow::Result<()> {
+        let payload = make_ct_payload(7, serde_json::json!({
+            "itemCard": {
+                "item": {"itemId": "456", "title": "商品", "price": "99", "mainPic": "img.jpg"},
+                "action": {"page": {"url": "https://item.example.com"}}
+            }
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::CustomNode { desc, content } = &decoded {
+            assert_eq!(desc, "商品卡片");
+            assert_eq!(content["fish_type"], "item_card");
+            assert_eq!(content["item_id"], "456");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_47_decode_image_missing_fields() -> anyhow::Result<()> {
+        // Image with minimal fields
+        let payload = make_ct_payload(2, serde_json::json!({
+            "image": {"pics": [{"url": "minimal.jpg"}]}
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::Image { image_url, width, height } = &decoded {
+            assert_eq!(image_url, "minimal.jpg");
+            assert_eq!(*width, 0);
+            assert_eq!(*height, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_48_decode_audio_missing_fields() -> anyhow::Result<()> {
+        let payload = make_ct_payload(3, serde_json::json!({
+            "audio": {"url": "sound.mp3"}
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::Audio { audio_url, duration_ms } = &decoded {
+            assert_eq!(audio_url, "sound.mp3");
+            assert_eq!(*duration_ms, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_49_decode_fish_trade_card_minimal() -> anyhow::Result<()> {
+        let payload = make_ct_payload(26, serde_json::json!({
+            "dxCard": {
+                "item": {
+                    "main": {
+                        "exContent": {},
+                        "clickParam": {"args": {}}
+                    }
+                },
+                "button": {}
+            }
+        }));
+        let decoded = decode_message(&payload)?;
+        if let MessageSegment::CustomNode { desc, content } = &decoded {
+            assert_eq!(desc, "交易卡片");
+            assert_eq!(content["order_id"], "");
+            assert_eq!(content["task_id"], "");
+        }
+        Ok(())
+    }
 }

@@ -405,4 +405,198 @@ mod tests {
         assert!(adapter_used.load(Ordering::SeqCst), "adapter should be passed and callable");
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_30_zero_handlers_does_not_panic() -> anyhow::Result<()> {
+        struct EmptyPlugin;
+        impl Plugin for EmptyPlugin {
+            fn metadata(&self) -> PluginMetadata { PluginMetadata { id: "empty".into(), name: "".into(), description: "".into(), ..Default::default() } }
+            fn message_handlers(&self) -> Vec<MessageHandler> { vec![] }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(EmptyPlugin);
+        let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
+
+        let mut event = make_event("anything");
+        event.set_callback(|_| Box::pin(async {}));
+
+        // Should not panic — empty handlers vec should be handled gracefully
+        let _ = actor_ref.tell(HandleEvent {
+            event,
+            adapter: Arc::new(MockAdapter),
+            ctx: Arc::new(Ctx::new()),
+        }).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_31_mixed_rule_and_no_rule_handlers() -> anyhow::Result<()> {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        struct MixedPlugin(Arc<AtomicUsize>);
+        impl Plugin for MixedPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "mixed".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                let c = Arc::clone(&self.0);
+                vec![
+                    // Handler with rule matching /ping — should execute
+                    MessageHandler {
+                        func: Arc::new({
+                            let count: Arc<AtomicUsize> = Arc::clone(&c);
+                            move |_, _, _| {
+                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
+                                Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
+                            }
+                        }),
+                        rule: Some(is_fullmatch(["/ping"])),
+                    },
+                    // Handler with rule matching /pong — should NOT execute for /ping
+                    MessageHandler {
+                        func: Arc::new({
+                            let count: Arc<AtomicUsize> = Arc::clone(&c);
+                            move |_, _, _| {
+                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
+                                Box::pin(async move { c2.fetch_add(10, Ordering::SeqCst); })
+                            }
+                        }),
+                        rule: Some(is_fullmatch(["/pong"])),
+                    },
+                    // Handler with no rule — should always execute
+                    MessageHandler {
+                        func: Arc::new({
+                            let count: Arc<AtomicUsize> = Arc::clone(&c);
+                            move |_, _, _| {
+                                let c2: Arc<AtomicUsize> = Arc::clone(&count);
+                                Box::pin(async move { c2.fetch_add(100, Ordering::SeqCst); })
+                            }
+                        }),
+                        rule: None,
+                    },
+                ]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(MixedPlugin(Arc::clone(&call_count)));
+        let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
+
+        let mut event = make_event("/ping");
+        event.set_callback(|_| Box::pin(async {}));
+
+        let _ = actor_ref.tell(HandleEvent {
+            event,
+            adapter: Arc::new(MockAdapter),
+            ctx: Arc::new(Ctx::new()),
+        }).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        // Only handler 1 (/ping rule match = +1) and handler 3 (no rule = +100) should fire
+        assert_eq!(call_count.load(Ordering::SeqCst), 101, "only matching rule and no-rule handlers should execute");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_32_handler_with_plugin_name() -> anyhow::Result<()> {
+        // Verify that plugin with a non-empty name works correctly
+        struct NamedPlugin;
+        impl Plugin for NamedPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "named".into(), name: "TestName".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                vec![MessageHandler { func: Arc::new(|_, _, _| Box::pin(async {})), rule: None }]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(NamedPlugin);
+        let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
+
+        let mut event = make_event("test");
+        event.set_callback(|_| Box::pin(async {}));
+
+        let _ = actor_ref.tell(HandleEvent {
+            event,
+            adapter: Arc::new(MockAdapter),
+            ctx: Arc::new(Ctx::new()),
+        }).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_33_multiple_events_to_same_actor() -> anyhow::Result<()> {
+        let counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
+        struct CountPlugin(Arc<AtomicUsize>);
+        impl Plugin for CountPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata { id: "count".into(), name: "".into(), description: "".into(), ..Default::default() }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                let c: Arc<AtomicUsize> = Arc::clone(&self.0);
+                vec![MessageHandler {
+                    func: Arc::new(move |_, _, _| {
+                        let c2: Arc<AtomicUsize> = Arc::clone(&c);
+                        Box::pin(async move { c2.fetch_add(1, Ordering::SeqCst); })
+                    }),
+                    rule: None,
+                }]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(CountPlugin(Arc::clone(&counter)));
+        let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
+
+        // Send 3 events
+        for _ in 0..3 {
+            let mut event = make_event("test");
+            event.set_callback(|_| Box::pin(async {}));
+            let _ = actor_ref.tell(HandleEvent {
+                event,
+                adapter: Arc::new(MockAdapter),
+                ctx: Arc::new(Ctx::new()),
+            }).await;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 3, "all 3 events should be handled");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_34_plugin_with_custom_metadata_name() -> anyhow::Result<()> {
+        struct CustomMetaPlugin;
+        impl Plugin for CustomMetaPlugin {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata {
+                    id: "custom_meta".into(),
+                    name: "元数据测试".into(),
+                    description: "".into(),
+                    ..Default::default()
+                }
+            }
+            fn message_handlers(&self) -> Vec<MessageHandler> {
+                vec![MessageHandler { func: Arc::new(|_, _, _| Box::pin(async {})), rule: None }]
+            }
+        }
+
+        let plugin: Arc<dyn Plugin> = Arc::new(CustomMetaPlugin);
+        let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
+
+        let mut event = make_event("test");
+        event.set_callback(|_| Box::pin(async {}));
+
+        let _ = actor_ref.tell(HandleEvent {
+            event,
+            adapter: Arc::new(MockAdapter),
+            ctx: Arc::new(Ctx::new()),
+        }).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
 }

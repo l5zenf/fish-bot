@@ -46,4 +46,15 @@ mod tests {
         unsafe { std::env::remove_var("RUST_LOG"); }
         Ok(())
     }
+
+    #[test]
+    fn t4_9_init_with_invalid_rust_log() -> anyhow::Result<()> {
+        // Set an invalid RUST_LOG value to trigger the unwrap_or_else fallback
+        unsafe { std::env::set_var("RUST_LOG", "invalid=filter=!!!"); }
+        let _ = std::panic::catch_unwind(|| {
+            super::init("fallback_level");
+        });
+        unsafe { std::env::remove_var("RUST_LOG"); }
+        Ok(())
+    }
 }
