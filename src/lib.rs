@@ -3,7 +3,3 @@ pub mod error;
 pub mod model;
 pub mod plugin;
 pub mod protocol;
-
-fn main() {
-    println!("Hello fish-bot");
-}
