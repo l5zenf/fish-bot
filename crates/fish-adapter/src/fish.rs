@@ -31,10 +31,11 @@ type WsWriter = futures::stream::SplitSink<
     WsMessage,
 >;
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
+type CallbackFn = Box<dyn Fn(MessageEvent) + Send + Sync>;
 
 /// Fish WebSocket adapter.
 pub struct FishWebSocketAdapter {
-    callback: Mutex<Option<Box<dyn Fn(MessageEvent) + Send + Sync>>>,
+    callback: Arc<Mutex<Option<CallbackFn>>>,
     api: FishAPI,
     ws_writer: RwLock<Option<WsWriter>>,
 }
@@ -50,7 +51,7 @@ impl FishWebSocketAdapter {
         let auth = AuthManager::new();
         let api = FishAPI::new(auth);
         Self {
-            callback: Mutex::new(None),
+            callback: Arc::new(Mutex::new(None)),
             api,
             ws_writer: RwLock::new(None),
         }
@@ -479,7 +480,7 @@ impl FishWebSocketAdapter {
 impl Clone for FishWebSocketAdapter {
     fn clone(&self) -> Self {
         Self {
-            callback: Mutex::new(None),
+            callback: Arc::clone(&self.callback),
             api: self.api.clone(),
             ws_writer: RwLock::new(None),
         }
@@ -500,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn t3_56_clone_has_independent_callback() -> anyhow::Result<()> {
+    fn t3_56_clone_preserves_callback() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         {
             let mut cb = adapter.callback.lock();
@@ -508,7 +509,7 @@ mod tests {
         }
         let cloned = adapter.clone();
         let cloned_cb = cloned.callback.lock();
-        assert!(cloned_cb.is_none(), "cloned adapter should have independent None callback");
+        assert!(cloned_cb.is_some(), "cloned adapter must share the callback (Arc-wrapped)");
         Ok(())
     }
 

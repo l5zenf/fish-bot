@@ -29,12 +29,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     plugin_manager.load_all_plugins();
 
     // Spawn each plugin as an isolated kameo actor
-    let mut plugin_refs: Vec<ActorRef<PluginActor>> = Vec::new();
+    let mut plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)> = Vec::new();
     let plugin_count = plugin_manager.plugins.len();
     for (id, plugin) in &plugin_manager.plugins {
         let actor_ref = PluginActor::spawn(PluginActor::new(Arc::clone(plugin)));
         tracing::info!("PluginActor spawned: [{}]", id);
-        plugin_refs.push(actor_ref);
+        plugin_refs.push((actor_ref, Arc::clone(plugin)));
     }
 
     // Create adapter

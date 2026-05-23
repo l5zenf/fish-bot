@@ -66,6 +66,21 @@ pub trait Plugin: Send + Sync + 'static {
     fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
         HashMap::new()
     }
+
+    /// Quick-check whether this plugin supports the given event.
+    ///
+    /// Returns `true` if at least one handler has no rule or has a matching rule.
+    /// Used by Bot to skip plugin actors whose rules can't match, avoiding
+    /// unnecessary actor dispatch.
+    fn supports(&self, event: &MessageEvent) -> bool {
+        if self.message_handlers().is_empty() {
+            return false;
+        }
+        self.message_handlers().iter().any(|h| match &h.rule {
+            Some(rule) => rule.check(event),
+            None => true,
+        })
+    }
 }
 
 // ---- Global registry ----

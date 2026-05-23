@@ -1,6 +1,7 @@
 use crate::message::{MessageChain, MessageSegment};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 type ReplyFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -11,7 +12,7 @@ pub struct MessageEvent {
     pub sender_id: String,
     pub sender_name: String,
     pub messages: MessageChain,
-    pub raw_payload: serde_json::Value,
+    pub raw_payload: Arc<serde_json::Value>,
     callback_func: Option<std::sync::Arc<dyn Fn(MessageSegment) -> ReplyFuture + Send + Sync>>,
 }
 
@@ -28,7 +29,7 @@ impl MessageEvent {
             sender_id,
             sender_name,
             messages,
-            raw_payload,
+            raw_payload: Arc::new(raw_payload),
             callback_func: None,
         }
     }
@@ -96,7 +97,7 @@ mod tests {
         assert_eq!(event.sender_id, "uid1");
         assert_eq!(event.sender_name, "Alice");
         assert_eq!(event.messages.plain_text(), "hello");
-        assert_eq!(event.raw_payload, raw);
+        assert_eq!(*event.raw_payload, raw);
         assert!(event.callback_func.is_none());
     }
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use kameo::prelude::*;
 use kameo::message::{Context, Message};
+use tokio::sync::Semaphore;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
@@ -10,14 +11,20 @@ use crate::plugin::Plugin;
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
+/// Concurrency is bounded by a semaphore to prevent unbounded task growth.
 #[derive(Actor)]
 pub struct PluginActor {
     plugin: Arc<dyn Plugin>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl PluginActor {
+    /// Create a new PluginActor with a default max concurrency of 64.
     pub fn new(plugin: Arc<dyn Plugin>) -> Self {
-        Self { plugin }
+        Self {
+            plugin,
+            semaphore: Arc::new(Semaphore::new(64)),
+        }
     }
 }
 
@@ -54,10 +61,12 @@ impl Message<HandleEvent> for PluginActor {
             let adapter = Arc::clone(&msg.adapter);
             let ctx = Arc::clone(&msg.ctx);
             let name = plugin_name.clone();
+            let sem = Arc::clone(&self.semaphore);
 
             tokio::spawn(async move {
-                // Panic safety: each handler runs in its own task.
-                // A panic here logs and stops only this handler invocation.
+                // Bound concurrency: acquire semaphore permit before running handler.
+                // Safe to unwrap: semaphore is never closed.
+                let _permit = sem.acquire_owned().await.expect("semaphore not closed");
                 func(event, adapter, ctx).await;
             });
 

@@ -13,14 +13,14 @@ use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
 #[derive(Actor)]
 pub struct Bot {
     adapter: Arc<dyn BaseAdapter>,
-    plugin_refs: Vec<ActorRef<PluginActor>>,
+    plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
     ctx: Arc<Ctx>,
 }
 
 impl Bot {
     pub fn new(
         adapter: Arc<dyn BaseAdapter>,
-        plugin_refs: Vec<ActorRef<PluginActor>>,
+        plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
         ctx: Arc<Ctx>,
     ) -> Self {
         Self {
@@ -67,8 +67,12 @@ impl Message<DispatchEvent> for Bot {
         let adapter = Arc::clone(&self.adapter);
         let ctx = Arc::clone(&self.ctx);
 
-        // Fan out to all plugin actors — each checks its own rules in isolation
-        for plugin_ref in &self.plugin_refs {
+        // Fan out to plugin actors — pre-filter by Plugin::supports() to skip
+        // plugins whose rules can't match, avoiding unnecessary actor dispatch.
+        for (plugin_ref, plugin) in &self.plugin_refs {
+            if !plugin.supports(&event) {
+                continue;
+            }
             let _ = plugin_ref
                 .tell(HandleEvent {
                     event: event.clone(),
@@ -170,8 +174,9 @@ mod tests {
         }
 
         let plugin: Arc<dyn Plugin> = Arc::new(EchoPlugin);
+        let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
 
         let event = make_event("/ping");
 
@@ -193,11 +198,12 @@ mod tests {
 
         let plugin1: Arc<dyn Plugin> = Arc::new(CounterPlugin(Arc::clone(&count1)));
         let plugin2: Arc<dyn Plugin> = Arc::new(CounterPlugin(Arc::clone(&count2)));
-
+        let p1 = Arc::clone(&plugin1);
+        let p2 = Arc::clone(&plugin2);
         let pref1 = PluginActor::spawn(PluginActor::new(plugin1));
         let pref2 = PluginActor::spawn(PluginActor::new(plugin2));
 
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![pref1, pref2], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(pref1, p1), (pref2, p2)], ctx));
 
         let mut event = make_event("/ping");
         event.set_callback(|_| Box::pin(async {}));
@@ -253,8 +259,9 @@ mod tests {
         }
 
         let plugin: Arc<dyn Plugin> = Arc::new(ReplyPlugin);
+        let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
 
         let mut event = make_event("/test");
         event.set_callback(|_| Box::pin(async {}));
@@ -289,8 +296,9 @@ mod tests {
         let ctx = Arc::new(Ctx::new());
 
         let plugin: Arc<dyn Plugin> = Arc::new(SelectivePlugin(called_clone));
+        let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
 
         let mut event = make_event("/skip");
         event.set_callback(|_| Box::pin(async {}));
@@ -338,8 +346,9 @@ mod tests {
         }
 
         let plugin: Arc<dyn Plugin> = Arc::new(MultiReplyPlugin);
+        let plugin_for_bot = Arc::clone(&plugin);
         let plugin_ref = PluginActor::spawn(PluginActor::new(plugin));
-        let bot_ref = Bot::spawn(Bot::new(adapter, vec![plugin_ref], ctx));
+        let bot_ref = Bot::spawn(Bot::new(adapter, vec![(plugin_ref, plugin_for_bot)], ctx));
 
         let event = make_event("/test");
         let _ = bot_ref.tell(DispatchEvent { event }).await;
