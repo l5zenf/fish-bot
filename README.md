@@ -1,6 +1,6 @@
 # fish-bot
 
-基于 [kameo](https://github.com/tqwewe/kameo) actor 框架的高性能闲鱼机器人，Rust 重写版 [myfish](https://github.com/Kaguya233qwq/myfish)。
+基于 [kameo](https://github.com/tqwewe/kameo) actor 框架的高性能闲鱼机器人。
 
 ## 架构
 
