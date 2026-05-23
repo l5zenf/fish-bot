@@ -312,6 +312,7 @@ dependencies = [
  "kameo",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -325,7 +326,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
- "tracing-subscriber",
  "tungstenite",
 ]
 

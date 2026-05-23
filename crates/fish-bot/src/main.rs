@@ -5,7 +5,7 @@ use kameo::prelude::*;
 use fish_adapter::adapter::BaseAdapter;
 use fish_adapter::fish::FishWebSocketAdapter;
 use fish_core::ctx::Ctx;
-use fish_core::logger;
+mod bootstrap;
 use fish_plugin::loader::PluginManager;
 use fish_plugin::plugin::actor::PluginActor;
 use fish_plugin::plugin::echo::EchoPlugin;
@@ -16,7 +16,7 @@ use bot::{Bot, DispatchEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    logger::init_logger("DEBUG");
+    bootstrap::init("DEBUG");
 
     // ---- Build shared dependency container ----
     let ctx = Arc::new(Ctx::new());
