@@ -1,14 +1,13 @@
 use crate::adapter::BaseAdapter;
 use crate::error::{AppError, Result};
-use crate::model::{Message, MessageEvent};
-use crate::plugin;
-use crate::protocol::decode_message;
+use crate::event::MessageEvent;
+use crate::message::MessageChain;
 use async_trait::async_trait;
 use futures::stream::SplitStream;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep, Duration};
@@ -18,10 +17,12 @@ use tokio_tungstenite::MaybeTlsStream;
 pub mod sign;
 pub mod auth;
 pub mod api;
+pub mod protocol;
 
 use api::FishAPI;
 use auth::AuthManager;
 use sign::{generate_mid, generate_uuid};
+use protocol::{decode_content, encode_chain};
 
 type WsWriter = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -29,8 +30,9 @@ type WsWriter = futures::stream::SplitSink<
 >;
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+/// Fish WebSocket adapter, matching Python adapters/fish/__init__.py FishWebSocketAdapter.
 pub struct FishWebSocketAdapter {
-    callback: std::sync::Mutex<Option<Box<dyn Fn(MessageEvent) + Send + Sync>>>,
+    callback: Mutex<Option<Box<dyn Fn(MessageEvent) + Send + Sync>>>,
     api: FishAPI,
     ws_writer: RwLock<Option<WsWriter>>,
 }
@@ -40,7 +42,7 @@ impl FishWebSocketAdapter {
         let auth = AuthManager::new();
         let api = FishAPI::new(auth);
         Self {
-            callback: std::sync::Mutex::new(None),
+            callback: Mutex::new(None),
             api,
             ws_writer: RwLock::new(None),
         }
@@ -61,9 +63,8 @@ impl FishWebSocketAdapter {
         }
     }
 
-    /// Main connection logic: connect → handshake → receive loop.
+    /// Main connection logic: connect -> handshake -> receive loop.
     async fn connect_and_run(self: &Arc<Self>) -> Result<()> {
-        let _cookie_str = self.api.cookies_str();
         let url = "wss://wss-goofish.dingtalk.com/";
         tracing::info!("Connecting to {}", url);
 
@@ -76,11 +77,11 @@ impl FishWebSocketAdapter {
             *guard = Some(writer);
         }
 
-        // --- Step 1: Get access token ---
+        // Step 1: Get access token
         let token = self.api.get_access_token().await?;
         tracing::info!("Got access token");
 
-        // --- Step 2: Send /reg message ---
+        // Step 2: Send /reg message
         let reg_msg = serde_json::json!({
             "lwp": "/reg",
             "headers": {
@@ -97,7 +98,7 @@ impl FishWebSocketAdapter {
         self.send_ws(&reg_msg).await?;
         tracing::info!("Sent /reg");
 
-        // --- Step 3: Send sync status ackDiff ---
+        // Step 3: Send sync status ackDiff
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -121,7 +122,7 @@ impl FishWebSocketAdapter {
         self.send_ws(&sync_msg).await?;
         tracing::info!("Sent sync ackDiff");
 
-        // --- Step 4: Spawn heartbeat ---
+        // Step 4: Spawn heartbeat
         let hb_self = self.clone();
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(15));
@@ -138,11 +139,11 @@ impl FishWebSocketAdapter {
             }
         });
 
-        // --- Step 5: Receive loop ---
+        // Step 5: Receive loop
         self.receive_loop(reader).await
     }
 
-    /// Receive loop: read messages, ack, decrypt, dispatch.
+    /// Receive loop: read messages, ack, decrypt, construct event, invoke callback.
     async fn receive_loop(self: &Arc<Self>, mut reader: WsReader) -> Result<()> {
         while let Some(msg_result) = reader.next().await {
             let text = match msg_result {
@@ -164,14 +165,14 @@ impl FishWebSocketAdapter {
         Ok(())
     }
 
-    /// Handle a single raw WS message frame.
+    /// Handle a single raw WS message frame, matching Python _handle_raw_message.
     async fn handle_raw_message(self: &Arc<Self>, text: &str) -> Result<()> {
         let msg: Value = serde_json::from_str(text)?;
 
         // Send ACK (200) back with headers
         if let Some(headers) = msg.get("headers") {
             let mut ack_headers = serde_json::json!({
-                "mid": headers.get("mid").and_then(|v| v.as_str()).unwrap_or(&generate_mid()),
+                "mid": headers.get("mid").and_then(|v| v.as_str()).unwrap_or(""),
                 "sid": headers.get("sid").and_then(|v| v.as_str()).unwrap_or(""),
             });
             for key in &["app-key", "ua", "dt"] {
@@ -201,15 +202,11 @@ impl FishWebSocketAdapter {
                 None => continue,
             };
 
-            // Try to decrypt: first attempt as encrypted, fallback to base64->JSON
+            // Try to decrypt: first attempt as encrypted, fallback to base64 -> JSON
             let decrypted = match sign::decrypt(raw_data) {
                 Ok(v) => v,
                 Err(_) => {
-                    // Fallback: base64 decode and parse as JSON
-                    match base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        raw_data,
-                    ) {
+                    match STANDARD.decode(raw_data.as_bytes()) {
                         Ok(bytes) => {
                             match serde_json::from_slice(&bytes) {
                                 Ok(v) => v,
@@ -222,18 +219,27 @@ impl FishWebSocketAdapter {
             };
 
             // Parse decrypted message into MessageEvent
-            self.dispatch_decrypted(decrypted).await?;
+            if let Some(event) = self.parse_event(&decrypted).await {
+                tracing::info!(
+                    "[接收] <- {}({}): {}",
+                    event.sender_name,
+                    event.sender_id,
+                    event.summary()
+                );
+
+                // Invoke callback (set by Bot)
+                if let Some(ref cb) = *self.callback.lock().unwrap() {
+                    cb(event);
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Parse a decrypted payload into a MessageEvent and dispatch.
-    async fn dispatch_decrypted(self: &Arc<Self>, payload: Value) -> Result<()> {
-        // The payload structure uses numbered fields (1, 2, 5, 6, 10) from the fish protocol.
-        // Try to extract the inner message content.
-        let body = payload.get("1").or_else(|| payload.get("body")).or(Some(&payload));
-        let body = body.ok_or_else(|| AppError::Protocol("No body in decrypted payload".into()))?;
+    /// Parse a decrypted payload into a MessageEvent, matching Python _handle_raw_message parsing.
+    async fn parse_event(self: &Arc<Self>, payload: &Value) -> Option<MessageEvent> {
+        let body = payload.get("1").or_else(|| payload.get("body")).or(Some(payload))?;
 
         // Extract sender info from field 10
         let sender_field = body.get("10").or_else(|| body.get("sender"));
@@ -246,7 +252,7 @@ impl FishWebSocketAdapter {
             .unwrap_or("");
         let cid = cid_raw.split('@').next().unwrap_or("").to_string();
 
-        // Extract sender ID from field 10 -> senderUserId
+        // Extract sender ID
         let sender_id = sender_field
             .and_then(|s| s.get("senderUserId").or_else(|| s.get("user_id")))
             .and_then(|v| v.as_str())
@@ -276,42 +282,196 @@ impl FishWebSocketAdapter {
                 .or_else(|| payload.get("messages"))
         });
 
-        let messages = match content {
-            Some(c) => {
-                // content has contentType and the actual data
-                if c.get("contentType").is_some() || c.get("content_type").is_some() {
-                    vec![decode_message(c).unwrap_or(Message::Unknown)]
-                } else if let Some(arr) = c.as_array() {
-                    arr.iter()
-                        .filter_map(|m| decode_message(m).ok())
-                        .collect()
-                } else {
-                    vec![decode_message(c).unwrap_or(Message::Unknown)]
-                }
-            }
-            None => vec![Message::Unknown],
+        let segments = match content {
+            Some(c) => decode_content(c).unwrap_or_default(),
+            None => Vec::new(),
         };
 
-        let event = MessageEvent::new(cid, sender_id, sender_name, messages, payload);
+        let messages = MessageChain::from(segments);
 
-        // Call user callback
-        if let Some(ref cb) = *self.callback.lock().unwrap() {
-            cb(event.clone());
+        // Skip messages from self
+        let my_id = self.api.my_id().await;
+        if sender_id == my_id {
+            return None;
         }
 
-        // Dispatch to plugins
-        let adapter: Arc<dyn BaseAdapter> = self.clone();
-        plugin::dispatch_event(&event, adapter).await;
+        Some(MessageEvent::new(
+            cid,
+            sender_id,
+            sender_name,
+            messages,
+            payload.clone(),
+        ))
+    }
 
-        Ok(())
+    /// Ensure we have valid authentication before connecting.
+    async fn ensure_auth(&self) -> Result<()> {
+        let cookies = self.api.auth().get_cookies().await;
+
+        if cookies.contains_key("unb") {
+            tracing::info!("Found local auth cookies, validating...");
+            match self.api.get_token().await {
+                Ok(res) => {
+                    let has_access_token = res
+                        .get("data")
+                        .and_then(|d| d.get("accessToken"))
+                        .and_then(|v| v.as_str())
+                        .is_some();
+
+                    if has_access_token {
+                        let unb = cookies.get("unb").cloned().unwrap_or_default();
+                        let nick = cookies
+                            .get("tracknick")
+                            .cloned()
+                            .unwrap_or_default();
+                        let nick = urlencoding::decode(&nick)
+                            .map(|s| s.to_string())
+                            .unwrap_or(nick);
+                        tracing::info!("Successfully logged in as {} ({})", nick, unb);
+                        return Ok(());
+                    }
+
+                    let ret_str = res.to_string();
+                    if ret_str.contains("FAIL_SYS_SESSION_EXPIRED") {
+                        tracing::warn!("Session expired, need to re-login");
+                        self.api.auth().rm_auth_file().await;
+                        {
+                            let mut c = self.api.auth().cookies.lock().await;
+                            c.clear();
+                        }
+                    } else if ret_str.contains("FAIL_SYS_USER_VALIDATE") {
+                        let url = res
+                            .get("data")
+                            .and_then(|d| d.get("url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        tracing::error!(
+                            "Risk control triggered! Please complete CAPTCHA in browser: {}",
+                            url
+                        );
+                        return Err(AppError::Auth(
+                            "Risk control triggered, manual CAPTCHA required".into(),
+                        ));
+                    } else {
+                        tracing::warn!("Token invalid, trying to refresh...");
+                        match self.api.get_token().await {
+                            Ok(refresh_res)
+                                if refresh_res
+                                    .get("data")
+                                    .and_then(|d| d.get("accessToken"))
+                                    .is_some() =>
+                            {
+                                tracing::info!("Token refreshed successfully");
+                                return Ok(());
+                            }
+                            _ => {
+                                tracing::warn!("Token refresh failed, need to re-login");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to validate auth: {}, proceeding to QR login", e);
+                }
+            }
+        } else {
+            tracing::info!("No local auth cookies found");
+        }
+
+        self.qrcode_login_flow().await
+    }
+
+    /// Full QR code login flow: get mh5tk -> generate QR -> display -> poll -> save cookies.
+    async fn qrcode_login_flow(&self) -> Result<()> {
+        tracing::info!("Starting QR code login flow...");
+        println!("\n  Please scan the QR code with the Xianyu (闲鱼) app to log in.\n");
+
+        let _ = self.api.get_mh5tk().await?;
+        tracing::info!("Got mh5tk cookies");
+
+        let qr_data = self
+            .api
+            .qrcode_gen()
+            .await?
+            .ok_or_else(|| AppError::Auth("Failed to generate QR code".into()))?;
+
+        let content = qr_data
+            .get("content")
+            .ok_or_else(|| AppError::Auth("QR code content missing".into()))?;
+
+        match qrcode::QrCode::new(content.as_bytes()) {
+            Ok(code) => {
+                let image = code
+                    .render::<qrcode::render::unicode::Dense1x2>()
+                    .dark_color(qrcode::render::unicode::Dense1x2::Dark)
+                    .light_color(qrcode::render::unicode::Dense1x2::Light)
+                    .build();
+                println!("{}", image);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to render QR code: {}, showing URL instead", e);
+                println!("QR Code URL: {}", content);
+            }
+        }
+
+        let t = qr_data.get("t").cloned().unwrap_or_default();
+        let ck = qr_data.get("ck").cloned().unwrap_or_default();
+
+        let mut is_scanned = false;
+        loop {
+            sleep(Duration::from_millis(1500)).await;
+
+            let result = self.api.qrcode_poll(&t, &ck).await?;
+            let status = result
+                .get("status")
+                .map(|s| s.as_str())
+                .unwrap_or("UNKNOWN");
+
+            match status {
+                "CONFIRMED" => {
+                    tracing::info!("Login confirmed! Session saved.");
+                    println!("  Login successful!");
+                    return Ok(());
+                }
+                "NEW" => continue,
+                "SCANED" => {
+                    if !is_scanned {
+                        is_scanned = true;
+                        tracing::info!("QR code scanned, waiting for confirmation on phone...");
+                        println!("  QR code scanned! Please confirm login on your phone.");
+                    }
+                }
+                "EXPIRED" => {
+                    tracing::warn!("QR code expired");
+                    return Err(AppError::Auth("QR code expired, please restart".into()));
+                }
+                "CANCELED" => {
+                    tracing::info!("User cancelled login on phone");
+                    return Err(AppError::Auth("Login cancelled".into()));
+                }
+                "ERROR" => {
+                    let redirect = result.get("redirect_url").cloned().unwrap_or_default();
+                    tracing::warn!(
+                        "Account is risk-controlled. Please visit URL to verify via SMS: {}",
+                        redirect
+                    );
+                    return Err(AppError::Auth(format!(
+                        "Risk control: verify at {}",
+                        redirect
+                    )));
+                }
+                _ => {
+                    tracing::debug!("Unknown QR status: {}", status);
+                }
+            }
+        }
     }
 }
 
 impl Clone for FishWebSocketAdapter {
     fn clone(&self) -> Self {
-        // We don't clone the WS writer — it will be set again in connect_and_run
         Self {
-            callback: std::sync::Mutex::new(None),
+            callback: Mutex::new(None),
             api: self.api.clone(),
             ws_writer: RwLock::new(None),
         }
@@ -325,8 +485,13 @@ impl BaseAdapter for FishWebSocketAdapter {
         *guard = Some(cb);
     }
 
-    async fn send(&self, target_id: &str, message: &Message, cid: Option<&str>) -> Result<()> {
-        let (payload, custom_type) = encode_with_type(message)?;
+    async fn send(
+        &self,
+        target_id: &str,
+        message: &MessageChain,
+        cid: Option<&str>,
+    ) -> Result<()> {
+        let (payload, custom_type) = encode_chain(message.segments())?;
         let encoded_data = STANDARD.encode(serde_json::to_string(&payload)?.as_bytes());
         let _cid = cid.unwrap_or(target_id);
         let my_id = self.api.my_id().await;
@@ -358,12 +523,12 @@ impl BaseAdapter for FishWebSocketAdapter {
 
     async fn run(&self) -> Result<()> {
         // Ensure auth before connecting
-        let ensure_msg = "Login/auth flow will be implemented when AuthManager is complete";
+        self.ensure_auth().await?;
 
         // Clone self into an Arc so we can share across tasks
         let arc_self = Arc::new(self.clone());
         loop {
-            tracing::info!("Starting adapter ({}). Connecting...", ensure_msg);
+            tracing::info!("Starting adapter. Connecting...");
             if let Err(e) = arc_self.connect_and_run().await {
                 tracing::error!("Connection error: {}, reconnecting in 5s...", e);
             } else {
@@ -371,53 +536,5 @@ impl BaseAdapter for FishWebSocketAdapter {
             }
             sleep(Duration::from_secs(5)).await;
         }
-    }
-}
-
-/// Encode a Message to its payload Value + contentType integer.
-/// This is a companion to protocol::encode_message that returns (payload, content_type).
-fn encode_with_type(msg: &Message) -> Result<(Value, i64)> {
-    match msg {
-        Message::Text { text } => Ok((
-            serde_json::json!({"contentType": 1, "text": {"text": text}}),
-            1,
-        )),
-        Message::Image { url, width, height } => Ok((
-            serde_json::json!({
-                "contentType": 2,
-                "image": { "pics": [{"type": 0, "url": url, "width": width, "height": height}] }
-            }),
-            2,
-        )),
-        Message::Audio { url, duration_ms } => Ok((
-            serde_json::json!({
-                "contentType": 3,
-                "audio": { "url": url, "duration": duration_ms }
-            }),
-            3,
-        )),
-        Message::Custom { segments } => {
-            let data = STANDARD.encode(
-                serde_json::to_string(
-                    &segments
-                        .iter()
-                        .map(|s| match s {
-                            Message::Text { text } => serde_json::json!({"type":"text","text":text}),
-                            Message::Image { url, .. } => serde_json::json!({"type":"image","image_url":url}),
-                            _ => serde_json::json!({"type":"unknown"}),
-                        })
-                        .collect::<Vec<_>>(),
-                )?
-                .as_bytes(),
-            );
-            Ok((
-                serde_json::json!({
-                    "contentType": 101,
-                    "custom": { "type": 2, "data": data }
-                }),
-                2,
-            ))
-        }
-        _ => Err(AppError::Protocol("Unsupported message type for send".into())),
     }
 }

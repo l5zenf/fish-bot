@@ -6,14 +6,12 @@ pub fn generate_sign(t: &str, token: &str, data: &str) -> Result<String> {
 }
 
 pub fn generate_mid() -> String {
-    // TODO: real FFI call
-    "mock_mid".to_string()
+    let uuid = uuid::Uuid::new_v4();
+    uuid.to_string()
 }
 
 pub fn generate_uuid() -> String {
-    // TODO: real FFI call
-    use std::time::{SystemTime, UNIX_EPOCH};
-    format!("uuid-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs())
+    uuid::Uuid::new_v4().to_string()
 }
 
 pub fn generate_device_id(user_id: &str) -> String {

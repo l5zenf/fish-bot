@@ -12,12 +12,8 @@ pub enum AppError {
     Base64(#[from] base64::DecodeError),
     #[error("Authentication failed: {0}")]
     Auth(String),
-    #[error("Sign FFI error: {0}")]
-    Sign(String),
     #[error("Protocol error: {0}")]
     Protocol(String),
-    #[error("Unknown error: {0}")]
-    Unknown(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
