@@ -6,19 +6,20 @@ use kameo::message::{Context, Message};
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
-use fish_core::event::MessageEvent;
+use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::message::{MessageChain, MessageSegment};
 use fish_core::telemetry::Telemetry;
-use fish_plugin::plugin::actor::{HandleEvent, PluginActor};
+use fish_plugin::plugin::actor::{HandleEvent, HandleSystemEvent, PluginActor};
 use fish_plugin::plugin::RouteHint;
 
 /// A routing target resolved at startup — maps a route to a specific handler.
+#[derive(Clone)]
 struct RouteTarget {
     plugin_ref: ActorRef<PluginActor>,
     handler_id: String,
 }
 
-/// Bot actor — receives MessageEvents and dispatches to PluginActors
+/// Bot actor — receives MessageEvents and SystemEvents, dispatches to PluginActors
 /// via a pre-compiled routing table instead of scanning all plugins.
 #[derive(Actor)]
 pub struct Bot {
@@ -32,6 +33,8 @@ pub struct Bot {
     /// Handlers Bot cannot pre-filter (Regex / Fallback) — always dispatched.
     /// PluginActor still checks the rule for these.
     fallback_routes: Vec<RouteTarget>,
+    /// System event routes — event_type → handlers.
+    event_routes: HashMap<String, Vec<RouteTarget>>,
     ctx: Arc<Ctx>,
     telemetry: Arc<Telemetry>,
 }
@@ -47,9 +50,11 @@ impl Bot {
         let mut prefix_routes = Vec::new();
         let mut keyword_routes = Vec::new();
         let mut fallback_routes = Vec::new();
+        let mut event_routes: HashMap<String, Vec<RouteTarget>> = HashMap::new();
 
         // Build routing table from all plugins' handlers
         for (plugin_ref, plugin) in &plugin_refs {
+            // Message handlers
             for handler in plugin.message_handlers() {
                 let target = RouteTarget {
                     plugin_ref: plugin_ref.clone(),
@@ -88,6 +93,19 @@ impl Bot {
                     }
                 }
             }
+
+            // Event handlers: event_type → handlers
+            for (event_type, event_handlers) in plugin.event_handlers() {
+                for handler in event_handlers {
+                    event_routes
+                        .entry(event_type.clone())
+                        .or_default()
+                        .push(RouteTarget {
+                            plugin_ref: plugin_ref.clone(),
+                            handler_id: handler.id.clone(),
+                        });
+                }
+            }
         }
 
         Self {
@@ -96,6 +114,7 @@ impl Bot {
             prefix_routes,
             keyword_routes,
             fallback_routes,
+            event_routes,
             ctx,
             telemetry,
         }
@@ -198,6 +217,45 @@ impl Message<DispatchEvent> for Bot {
                     ctx: Arc::clone(&ctx),
                     handler_id: Some(handler_id),
                     telemetry: Arc::clone(&telemetry),
+                })
+                .await;
+        }
+    }
+}
+
+// ---- System Event ----
+
+/// Dispatch a system event — sent by the adapter when a non-chat event arrives.
+pub struct DispatchSystemEvent {
+    pub event: Arc<SystemEvent>,
+}
+
+impl Message<DispatchSystemEvent> for Bot {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: DispatchSystemEvent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let targets = self.event_routes.get(&msg.event.event_type).cloned().unwrap_or_default();
+        if targets.is_empty() {
+            tracing::debug!(
+                event_type = %msg.event.event_type,
+                "no handlers for system event"
+            );
+            return;
+        }
+
+        for target in targets {
+            let _ = target
+                .plugin_ref
+                .tell(HandleSystemEvent {
+                    event: Arc::clone(&msg.event),
+                    adapter: Arc::clone(&self.adapter),
+                    ctx: Arc::clone(&self.ctx),
+                    handler_id: Some(target.handler_id),
+                    telemetry: Arc::clone(&self.telemetry),
                 })
                 .await;
         }

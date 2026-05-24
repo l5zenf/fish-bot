@@ -36,23 +36,27 @@ adapter (平台) → Bot (路由 & 派发) → PluginActor (handler 执行)
     ├── FishAPI          ├── exact_routes (HashMap)
     ├── FishConnection   ├── prefix_routes
     └── AuthManager      ├── keyword_routes
-                         └── fallback_routes
+                         ├── fallback_routes
+                         └── event_routes (HashMap) ─── SystemEvent → PluginActor (EventHandler) 
 ```
 
-- **Adapter** — 与闲鱼 WebSocket 交互：登录、连接、心跳、编解码
-- **Bot** — 消息入口，按预编译路由表 `O(1)` ~ `O(n)` 派发到 PluginActor
+- **Adapter** — 与闲鱼 WebSocket 交互：登录、连接、心跳、编解码；聊天消息走 `callback`，非聊天事件走 `event_callback`
+- **Bot** — 消息入口，按预编译路由表 `O(1)` ~ `O(n)` 派发到 PluginActor；`event_routes` 按事件类型路由业务事件
 - **PluginActor** — 每个插件独立 actor，执行 handler，超时 / panic 不波及其它插件
 
 ## 写一个插件
 
 ```rust
+use std::collections::HashMap;
 use std::sync::Arc;
-use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler, RouteHint, HandlerContext};
+use fish_plugin::plugin::{Plugin, PluginMetadata, MessageHandler, EventHandler, RouteHint, HandlerContext};
+use fish_core::message::MessageChain;
 use fish_core::message::MessageSegment;
 
 pub struct MyPlugin {
     metadata: PluginMetadata,
     handlers: Vec<MessageHandler>,
+    event_handlers: HashMap<String, Vec<EventHandler>>,
 }
 
 impl MyPlugin {
@@ -88,6 +92,18 @@ impl MyPlugin {
                     }),
                 ),
             ],
+            event_handlers: {
+                let mut map = HashMap::new();
+                map.insert("order_create".into(), vec![
+                    EventHandler::new("auto_reply", Arc::new(|event, adapter, _ctx| {
+                        Box::pin(async move {
+                            tracing::info!("order event: {:?}", event.payload);
+                            let _ = adapter.send("buyer", &MessageChain::from("感谢下单！"), None).await;
+                        })
+                    })),
+                ]);
+                map
+            },
         }
     }
 }
@@ -95,6 +111,7 @@ impl MyPlugin {
 impl Plugin for MyPlugin {
     fn metadata(&self) -> &PluginMetadata { &self.metadata }
     fn message_handlers(&self) -> &[MessageHandler] { &self.handlers }
+    fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> { self.event_handlers.clone() }
 }
 ```
 
@@ -125,6 +142,67 @@ MessageHandler::regex("id", r"^\d{11}$", handler)
 MessageHandler::fallback("id", handler)           // 无前置规则
 MessageHandler::new("id", RouteHint::Fallback, Some(rule), handler)  // 自定义规则
 ```
+
+## SystemEvent 事件处理
+
+除了响应聊天消息，插件还可以监听业务事件（下单、拍下、系统通知等）。这些事件来自 WebSocket 的非聊天推送，由 Adapter 的 `classify_event_type()` 自动分类后派发。
+
+### EventHandler
+
+```rust
+use std::collections::HashMap;
+use fish_plugin::plugin::{EventHandler, EventHandlerFunc};
+use fish_core::event::SystemEvent;
+
+// EventHandler 签名
+pub type EventHandlerFunc = Arc<
+    dyn Fn(Arc<SystemEvent>, Arc<dyn BaseAdapter>, Arc<Ctx>) -> EventHandlerFuture + Send + Sync,
+>;
+
+pub struct EventHandler {
+    pub id: String,
+    pub func: EventHandlerFunc,
+    pub rule: Option<Rule>,
+}
+```
+
+### 在插件中注册事件处理
+
+实现 `Plugin` trait 的 `event_handlers()` 方法，按事件类型返回 handler：
+
+```rust
+fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
+    let mut map = HashMap::new();
+    map.insert("order_create".into(), vec![
+        EventHandler::new("auto_reply", Arc::new(|event, adapter, _ctx| {
+            Box::pin(async move {
+                tracing::info!("收到下单事件: {:?}", event.payload);
+                // 使用 adapter 发送通知
+                let _ = adapter.send("buyer", &MessageChain::from("感谢下单！"), None).await;
+            })
+        })),
+    ]);
+    map.insert("item_purchased".into(), vec![
+        EventHandler::new("notify", Arc::new(|event, adapter, _ctx| {
+            Box::pin(async move {
+                let _ = adapter.send("seller", &MessageChain::from("商品已售出！"), None).await;
+            })
+        })),
+    ]);
+    map
+}
+```
+
+### SystemEvent 结构
+
+```rust
+pub struct SystemEvent {
+    pub event_type: String,         // 事件类型（由 classify_event_type 提取）
+    pub payload: Arc<serde_json::Value>,  // 原始业务数据
+}
+```
+
+事件类型从 payload 的 `action` / `type` / `eventType` / `bizType` 字段自动提取，未知事件统一归为 `"unknown"`。
 
 ## HandlerContext
 

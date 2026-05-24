@@ -3,6 +3,23 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// A system-level event (non-chat-message) received from the WebSocket.
+/// Examples: trade order placed, item purchased, system notifications.
+#[derive(Clone, Debug)]
+pub struct SystemEvent {
+    pub event_type: String,
+    pub payload: Arc<serde_json::Value>,
+}
+
+impl SystemEvent {
+    pub fn new(event_type: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            event_type: event_type.into(),
+            payload: Arc::new(payload),
+        }
+    }
+}
+
 type ReplyFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Message event context.

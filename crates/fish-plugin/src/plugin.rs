@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::error::Result;
-use fish_core::event::MessageEvent;
+use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::rule::{is_fullmatch, is_keywords, is_regex, is_startswith, Rule};
 use fish_core::telemetry::Telemetry;
 pub mod actor;
@@ -176,15 +176,32 @@ impl MessageHandler {
     }
 }
 
+/// A pinned, boxed future returned by an event handler function.
+pub type EventHandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Event handler function type — receives SystemEvent + adapter + ctx.
+pub type EventHandlerFunc = Arc<
+    dyn Fn(Arc<SystemEvent>, Arc<dyn BaseAdapter>, Arc<Ctx>) -> EventHandlerFuture + Send + Sync,
+>;
+
 /// An event handler registered by a plugin.
-/// Handles non-message events (notices, requests, meta events).
+/// Handles non-message events (notices, business events like trade orders, etc.).
+#[derive(Clone)]
 pub struct EventHandler {
-    pub func: Arc<
-        dyn Fn(serde_json::Value, Arc<dyn BaseAdapter>, Arc<Ctx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            + Send
-            + Sync,
-    >,
+    pub id: String,
+    pub func: EventHandlerFunc,
     pub rule: Option<Rule>,
+}
+
+impl EventHandler {
+    /// Create a new event handler with the given id and function.
+    pub fn new(id: impl Into<String>, func: EventHandlerFunc) -> Self {
+        Self {
+            id: id.into(),
+            func,
+            rule: None,
+        }
+    }
 }
 
 /// Plugin trait.
@@ -339,17 +356,9 @@ mod tests {
 
     #[test]
     fn t2_20_event_handler_construct() -> anyhow::Result<()> {
-        let handler_with_rule = EventHandler {
-            func: Arc::new(|_, _, _| Box::pin(async {})),
-            rule: Some(Rule::new(|_| true)),
-        };
-        assert!(handler_with_rule.rule.is_some());
-
-        let handler_no_rule = EventHandler {
-            func: Arc::new(|_, _, _| Box::pin(async {})),
-            rule: None,
-        };
-        assert!(handler_no_rule.rule.is_none());
+        let handler = EventHandler::new("test_event", Arc::new(|_, _, _| Box::pin(async {})));
+        assert_eq!(handler.id, "test_event");
+        assert!(handler.rule.is_none());
         Ok(())
     }
 
@@ -362,10 +371,7 @@ mod tests {
             fn metadata(&self) -> &PluginMetadata { &self.meta }
             fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
                 let mut map = HashMap::new();
-                map.insert("notice".into(), vec![EventHandler {
-                    func: Arc::new(|_, _, _| Box::pin(async {})),
-                    rule: None,
-                }]);
+                map.insert("notice".into(), vec![EventHandler::new("notice_handler", Arc::new(|_, _, _| Box::pin(async {})))]);
                 map
             }
         }

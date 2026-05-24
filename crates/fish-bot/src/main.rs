@@ -14,7 +14,7 @@ use fish_plugin::plugin::echo::EchoPlugin;
 use fish_plugin::plugin::register_plugin;
 
 mod bot;
-use bot::{Bot, DispatchEvent};
+use bot::{Bot, DispatchEvent, DispatchSystemEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,6 +71,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let b = bot.clone();
         tokio::spawn(async move {
             let _ = b.tell(DispatchEvent { event }).await;
+        });
+    }));
+
+    // Wire system event callback
+    let bot_for_events = bot_ref.clone();
+    adapter_dyn.set_event_callback(Box::new(move |sys_event| {
+        let b = bot_for_events.clone();
+        tokio::spawn(async move {
+            let _ = b.tell(DispatchSystemEvent { event: Arc::new(sys_event) }).await;
         });
     }));
 

@@ -7,8 +7,8 @@ use tokio::sync::Semaphore;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
-use fish_core::event::MessageEvent;
-use crate::plugin::{HandlerContext, MessageHandler, Plugin, QueueStrategy, RouteHint};
+use fish_core::event::{MessageEvent, SystemEvent};
+use crate::plugin::{EventHandlerFunc, HandlerContext, MessageHandler, Plugin, QueueStrategy, RouteHint};
 use fish_core::telemetry::Telemetry;
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
@@ -309,6 +309,57 @@ impl Message<HandleEvent> for PluginActor {
 }
 
 // ---- Messages ----
+
+/// Handle a system event — dispatched by Bot for non-chat business events.
+/// Routes to the plugin's event_handlers by matching event_type.
+pub struct HandleSystemEvent {
+    pub event: Arc<SystemEvent>,
+    pub adapter: Arc<dyn BaseAdapter>,
+    pub ctx: Arc<Ctx>,
+    pub handler_id: Option<String>,
+    pub telemetry: Arc<Telemetry>,
+}
+
+impl Message<HandleSystemEvent> for PluginActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HandleSystemEvent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let handlers = self.plugin.event_handlers();
+
+        // Collect Arc clones before handlers is dropped (lifetime issue with tokio::spawn)
+        let funcs: Vec<EventHandlerFunc> = match &msg.handler_id {
+            Some(hid) => handlers
+                .values()
+                .flatten()
+                .filter(|h| &h.id == hid)
+                .map(|h| Arc::clone(&h.func))
+                .collect(),
+            None => handlers
+                .get(&msg.event.event_type)
+                .map(|v| v.iter().map(|h| Arc::clone(&h.func)).collect())
+                .unwrap_or_default(),
+        };
+
+        for func in funcs {
+            let event = Arc::clone(&msg.event);
+            let adapter = Arc::clone(&msg.adapter);
+            let ctx = Arc::clone(&msg.ctx);
+            let telemetry = Arc::clone(&msg.telemetry);
+
+            telemetry.handler_started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(async move {
+                (func)(event, adapter, ctx).await;
+                telemetry
+                    .handler_succeeded
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

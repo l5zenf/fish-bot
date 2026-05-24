@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fish_core::error::Result;
-use fish_core::event::MessageEvent;
+use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::message::MessageChain;
 use futures::stream::SplitStream;
 use futures::StreamExt;
@@ -27,6 +27,7 @@ type CallbackFn = Box<dyn Fn(MessageEvent) + Send + Sync>;
 /// Thin coordinator: ties together FishAPI (HTTP auth) and FishConnection (WS transport).
 pub struct FishWebSocketAdapter {
     callback: Arc<Mutex<Option<CallbackFn>>>,
+    event_callback: Arc<Mutex<Option<Box<dyn Fn(SystemEvent) + Send + Sync>>>>,
     api: FishAPI,
     conn: Arc<FishConnection>,
 }
@@ -37,6 +38,7 @@ impl FishWebSocketAdapter {
         let api = FishAPI::new(auth);
         Self {
             callback: Arc::new(Mutex::new(None)),
+            event_callback: Arc::new(Mutex::new(None)),
             api,
             conn: Arc::new(FishConnection::new()),
         }
@@ -134,17 +136,26 @@ impl FishWebSocketAdapter {
             };
 
             // Parse decrypted message into MessageEvent
-            if let Some(event) = self.parse_event(&decrypted).await {
-                tracing::info!(
-                    "[接收] <- {}({}): {}",
-                    event.sender_name,
-                    event.sender_id,
-                    event.summary()
-                );
+            match self.parse_event(&decrypted).await {
+                Some(event) => {
+                    tracing::info!(
+                        "[接收] <- {}({}): {}",
+                        event.sender_name,
+                        event.sender_id,
+                        event.summary()
+                    );
 
-                // Invoke callback (set by Bot)
-                if let Some(ref cb) = *self.callback.lock() {
-                    cb(event);
+                    // Invoke message callback (set by Bot)
+                    if let Some(ref cb) = *self.callback.lock() {
+                        cb(event);
+                    }
+                }
+                None => {
+                    // Not a chat message — classify and emit as SystemEvent
+                    let event_type = classify_event_type(&decrypted);
+                    if let Some(ref cb) = *self.event_callback.lock() {
+                        cb(SystemEvent::new(event_type, decrypted));
+                    }
                 }
             }
         }
@@ -244,6 +255,7 @@ impl Clone for FishWebSocketAdapter {
     fn clone(&self) -> Self {
         Self {
             callback: Arc::clone(&self.callback),
+            event_callback: Arc::clone(&self.event_callback),
             api: self.api.clone(),
             conn: Arc::clone(&self.conn),
         }
@@ -254,6 +266,11 @@ impl Clone for FishWebSocketAdapter {
 impl BaseAdapter for FishWebSocketAdapter {
     fn set_callback(&self, cb: Box<dyn Fn(MessageEvent) + Send + Sync>) {
         let mut guard = self.callback.lock();
+        *guard = Some(cb);
+    }
+
+    fn set_event_callback(&self, cb: Box<dyn Fn(SystemEvent) + Send + Sync>) {
+        let mut guard = self.event_callback.lock();
         *guard = Some(cb);
     }
 
@@ -309,6 +326,19 @@ impl BaseAdapter for FishWebSocketAdapter {
             sleep(Duration::from_secs(5)).await;
         }
     }
+}
+
+/// Try to extract a meaningful event type from a non-chat decrypted payload.
+/// Examines common field names that fish server uses for business events.
+fn classify_event_type(payload: &Value) -> String {
+    payload
+        .get("action")
+        .or_else(|| payload.get("type"))
+        .or_else(|| payload.get("eventType"))
+        .or_else(|| payload.get("bizType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 #[cfg(test)]

@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use fish_core::message::MessageSegment;
-use crate::plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
+use fish_core::message::{MessageChain, MessageSegment};
+use crate::plugin::{EventHandler, HandlerContext, MessageHandler, Plugin, PluginMetadata};
 
 /// Echo plugin — replies with the received message content.
+/// Also demonstrates event handler pattern for business events.
 pub struct EchoPlugin {
     metadata: PluginMetadata,
     handlers: Vec<MessageHandler>,
+    event_handlers: HashMap<String, Vec<EventHandler>>,
 }
 
 impl EchoPlugin {
@@ -31,6 +34,29 @@ impl EchoPlugin {
                     })
                 }),
             )],
+            event_handlers: {
+                let mut map = HashMap::new();
+                map.insert("order_create".into(), vec![
+                    EventHandler::new("order_notify", Arc::new(|event, adapter, _ctx| {
+                        Box::pin(async move {
+                            // event.payload 包含原始业务数据
+                            let payload = &event.payload;
+                            tracing::info!("order_create event: {:?}", payload);
+                            // 可以在这里发送通知、回复用户等
+                            let _ = adapter.send("target_user", &MessageChain::from("感谢您的下单！"), None).await;
+                        })
+                    })),
+                ]);
+                map.insert("item_purchased".into(), vec![
+                    EventHandler::new("purchase_notify", Arc::new(|event, adapter, _ctx| {
+                        Box::pin(async move {
+                            tracing::info!("item_purchased event: {:?}", event.payload);
+                            let _ = adapter.send("target_user", &MessageChain::from("商品已售出！"), None).await;
+                        })
+                    })),
+                ]);
+                map
+            },
         }
     }
 }
@@ -42,6 +68,10 @@ impl Plugin for EchoPlugin {
 
     fn message_handlers(&self) -> &[MessageHandler] {
         &self.handlers
+    }
+
+    fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
+        self.event_handlers.clone()
     }
 }
 
