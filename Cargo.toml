@@ -46,6 +46,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 md5 = "0.7"
+rmp-serde = "1.3"
 
 # --- internal ---
 fish-core = { path = "crates/fish-core" }

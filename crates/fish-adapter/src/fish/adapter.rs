@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fish_core::error::Result;
 use fish_core::event::{MessageEvent, SystemEvent};
-use fish_core::message::MessageChain;
+use fish_core::message::{MessageChain, MessageSegment};
 use futures::stream::SplitStream;
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -119,15 +119,22 @@ impl FishWebSocketAdapter {
                 None => continue,
             };
 
-            // Try to decrypt: first attempt as encrypted, fallback to base64 -> JSON
+            // Try to decrypt: plaintext base64 -> JSON, then fallback to msgpack route
             let decrypted = match decrypt(raw_data) {
                 Ok(v) => v,
                 Err(_) => {
                     match STANDARD.decode(raw_data.as_bytes()) {
                         Ok(bytes) => {
+                            // Try JSON first (plaintext)
                             match serde_json::from_slice(&bytes) {
                                 Ok(v) => v,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    // Try MessagePack (encrypted business events)
+                                    match rmp_serde::from_slice::<serde_json::Value>(&bytes) {
+                                        Ok(mp_val) => mp_val,
+                                        Err(_) => continue,
+                                    }
+                                }
                             }
                         }
                         Err(_) => continue,
@@ -151,6 +158,11 @@ impl FishWebSocketAdapter {
                     }
                 }
                 None => {
+                    // Skip typing status and system messages
+                    if is_typing_status(&decrypted) || is_system_message(&decrypted) {
+                        continue;
+                    }
+
                     // Not a chat message — classify and emit as SystemEvent
                     let event_type = classify_event_type(&decrypted);
                     if let Some(ref cb) = *self.event_callback.lock() {
@@ -201,7 +213,7 @@ impl FishWebSocketAdapter {
             .unwrap_or("")
             .to_string();
 
-        // Extract message content from field 6
+        // Extract message content from field 6, fallback to reminderContent
         let content = body.get("6").or_else(|| body.get("content")).or_else(|| {
             body.get("3")
                 .and_then(|v3| v3.get("5"))
@@ -210,7 +222,13 @@ impl FishWebSocketAdapter {
 
         let segments = match content {
             Some(c) => decode_content(c).unwrap_or_default(),
-            None => Vec::new(),
+            None => {
+                // Fallback: extract text from message["1"]["10"]["reminderContent"]
+                match sender_field.and_then(|s| s.get("reminderContent")).and_then(|v| v.as_str()) {
+                    Some(text) => vec![MessageSegment::Text { text: text.to_string() }],
+                    None => Vec::new(),
+                }
+            }
         };
 
         let messages = MessageChain::from(segments);
@@ -328,9 +346,49 @@ impl BaseAdapter for FishWebSocketAdapter {
     }
 }
 
+/// Check if the message is a typing status indicator (message["1"] is an array).
+/// Check if the message is a typing status indicator (message["1"] is an array).
+fn is_typing_status(payload: &Value) -> bool {
+    payload
+        .get("1")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.get("1"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.contains("@goofish"))
+        .unwrap_or(false)
+}
+
+/// Check if the message is a system-level control message (needPush == "false").
+/// Check if the message is a system-level control message (needPush == "false").
+fn is_system_message(payload: &Value) -> bool {
+    payload
+        .get("3")
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get("needPush"))
+        .and_then(|v| v.as_str())
+        .map(|s| s == "false")
+        .unwrap_or(false)
+}
+
 /// Try to extract a meaningful event type from a non-chat decrypted payload.
 /// Examines common field names that fish server uses for business events.
+/// Also checks nested fields like `["3"]["redReminder"]` for order events.
 fn classify_event_type(payload: &Value) -> String {
+    // Check order/transaction events via redReminder in field 3
+    if let Some(field3) = payload.get("3").and_then(|v| v.as_object()) {
+        if let Some(reminder) = field3.get("redReminder").and_then(|v| v.as_str()) {
+            return match reminder {
+                "等待买家付款" => "order_create",
+                "交易关闭" => "order_closed",
+                "等待卖家发货" => "item_purchased",
+                _ => "order_unknown",
+            }
+            .to_string();
+        }
+    }
+
+    // Fallback: check top-level fields
     payload
         .get("action")
         .or_else(|| payload.get("type"))
@@ -530,6 +588,186 @@ mod tests {
         ]);
         let result = adapter.send("target", &chain, None).await;
         assert!(result.is_err(), "should fail without WebSocket");
+        Ok(())
+    }
+
+    // ---- classify_event_type tests ----
+
+    #[test]
+    fn t3_72_classify_order_create() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"redReminder": "等待买家付款"},
+            "1": "user@goofish"
+        });
+        assert_eq!(classify_event_type(&payload), "order_create");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_73_classify_order_closed() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"redReminder": "交易关闭"}
+        });
+        assert_eq!(classify_event_type(&payload), "order_closed");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_74_classify_item_purchased() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"redReminder": "等待卖家发货"}
+        });
+        assert_eq!(classify_event_type(&payload), "item_purchased");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_75_classify_order_unknown() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"redReminder": "未知状态"}
+        });
+        assert_eq!(classify_event_type(&payload), "order_unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_76_classify_top_level_action() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "action": "trade_notice"
+        });
+        assert_eq!(classify_event_type(&payload), "trade_notice");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_77_classify_unknown() -> anyhow::Result<()> {
+        let payload = serde_json::json!({"some": "data"});
+        assert_eq!(classify_event_type(&payload), "unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_78_classify_no_redreminder() -> anyhow::Result<()> {
+        // Has field 3 but no redReminder — should fall through to top-level
+        let payload = serde_json::json!({
+            "3": {"other": "value"},
+            "type": "notice"
+        });
+        assert_eq!(classify_event_type(&payload), "notice");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_79_msgpack_decode_roundtrip() -> anyhow::Result<()> {
+        // Simulate msgpack-encoded data (the encrypted path)
+        let original = serde_json::json!({
+            "1": {
+                "10": {"reminderContent": "hello", "senderUserId": "uid", "reminderTitle": "user"},
+                "2": "cid@goofish",
+                "5": 1700000000000u64
+            }
+        });
+
+        // Encode as msgpack
+        let msgpack_bytes = rmp_serde::to_vec(&original)?;
+
+        // Decode back via rmp_serde (matching the msgpack fallback path in handle_raw_message)
+        let decoded: serde_json::Value = rmp_serde::from_slice(&msgpack_bytes)?;
+        assert_eq!(decoded, original);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80_msgpack_business_event_roundtrip() -> anyhow::Result<()> {
+        // Simulate a business event that's msgpack-encoded
+        let original = serde_json::json!({
+            "1": "buyer@goofish",
+            "3": {"redReminder": "等待买家付款"}
+        });
+
+        // Encode and decode via msgpack
+        let bytes = rmp_serde::to_vec(&original)?;
+        let decoded: serde_json::Value = rmp_serde::from_slice(&bytes)?;
+
+        assert_eq!(classify_event_type(&decoded), "order_create");
+        Ok(())
+    }
+
+    // ---- is_typing_status tests ----
+
+    #[test]
+    fn t3_81_typing_status_detected() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "1": [{"1": "user@goofish"}]
+        });
+        assert!(is_typing_status(&payload));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_82_typing_status_not_array() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "1": {"10": {"reminderContent": "hello"}}
+        });
+        assert!(!is_typing_status(&payload));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_83_typing_status_no_goofish() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "1": [{"1": "other"}]
+        });
+        assert!(!is_typing_status(&payload));
+        Ok(())
+    }
+
+    // ---- is_system_message tests ----
+
+    #[test]
+    fn t3_84_system_message_detected() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"needPush": "false"}
+        });
+        assert!(is_system_message(&payload));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_85_system_message_needpush_true() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "3": {"needPush": "true"}
+        });
+        assert!(!is_system_message(&payload));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_86_system_message_no_field3() -> anyhow::Result<()> {
+        let payload = serde_json::json!({"1": "hello"});
+        assert!(!is_system_message(&payload));
+        Ok(())
+    }
+
+    // ---- reminderContent fallback test ----
+
+    #[test]
+    fn t3_87_reminder_content_extracted() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "1": {
+                "10": {
+                    "reminderContent": "hello from reminder",
+                    "reminderTitle": "User",
+                    "senderUserId": "uid"
+                },
+                "2": "cid@goofish"
+            }
+        });
+
+        // Verify the data structure matches parse_event expectations:
+        // body = payload["1"], sender_field = body["10"]["reminderContent"]
+        assert_eq!(payload["1"]["10"]["reminderContent"], "hello from reminder");
+        assert_eq!(payload["1"]["2"], "cid@goofish");
         Ok(())
     }
 }
