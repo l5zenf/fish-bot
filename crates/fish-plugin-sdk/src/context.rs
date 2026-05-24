@@ -2,119 +2,169 @@ use std::sync::Arc;
 
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
-use fish_core::error::Result;
+use fish_core::error::{AppError, Result};
 use fish_core::event::{MessageEvent, SystemEvent};
-use fish_core::message::{MessageChain, MessageSegment};
+use fish_core::message::MessageSegment;
 use fish_core::telemetry::Telemetry;
-use fish_plugin::plugin::HandlerContext;
 
-/// Ergonomics wrapper around `HandlerContext` for plugin handlers.
+/// Context passed to plugin handlers.
 ///
-/// Provides convenient methods like `reply()`, `sender_id()`, `text()`
-/// so plugin authors don't need to reach into the raw `HandlerContext` fields.
-///
-/// For event handlers (`#[event]`), create via `Context::new_from_event()`.
-/// In that case `reply()`, `sender_id()`, and `text()` are not available
-/// (they will return errors / panics).
+/// Can represent either a message handler context (`#[command]`, `#[message]`)
+/// or a system event handler context (`#[event]`). Some methods are only
+/// available in one variant and return `Err` in the other.
 pub struct Context {
     pub(crate) inner: ContextInner,
 }
 
 pub(crate) enum ContextInner {
-    #[allow(dead_code)]
-    Message(HandlerContext),
+    Message {
+        event: MessageEvent,
+        adapter: Arc<dyn BaseAdapter>,
+        app_ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
+    },
+    System {
+        event: Arc<SystemEvent>,
+        adapter: Arc<dyn BaseAdapter>,
+        app_ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
+    },
 }
 
 impl Context {
-    /// Create from a handler context (message handlers).
-    pub(crate) fn new(inner: HandlerContext) -> Self {
+    /// Create from a `HandlerContext` (message handlers).
+    pub(crate) fn new(
+        event: MessageEvent,
+        adapter: Arc<dyn BaseAdapter>,
+        app_ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
+    ) -> Self {
         Self {
-            inner: ContextInner::Message(inner),
+            inner: ContextInner::Message {
+                event,
+                adapter,
+                app_ctx,
+                telemetry,
+            },
         }
     }
 
-    /// Create from system event + adapter + ctx (event handlers).
-    #[allow(unused_variables)]
+    /// Create from a system event (event handlers).
     pub(crate) fn new_from_event(
         event: Arc<SystemEvent>,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,
     ) -> Self {
         Self {
-            inner: ContextInner::Message(HandlerContext {
-                event: MessageEvent::new(
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    MessageChain::new(),
-                    serde_json::Value::Null,
-                ),
+            inner: ContextInner::System {
+                event,
                 adapter,
                 app_ctx,
                 telemetry: Arc::new(Telemetry::new()),
-                plugin_state: None,
-            }),
+            },
         }
     }
 
-    /// Reply with a text message to the event sender.
-    /// Available only for message handlers (`#[command]`, `#[message]`).
-    /// Panics if called in an event handler context.
+    // -- Message-only methods --
+
+    /// Reply with a text message. Available only in message handler context.
     pub async fn reply(&self, text: impl Into<String>) -> Result<()> {
         match &self.inner {
-            ContextInner::Message(hc) => {
-                hc.event.reply(MessageSegment::text(text.into())).await;
+            ContextInner::Message { event, .. } => {
+                event.reply(MessageSegment::text(text.into())).await;
                 Ok(())
             }
+            ContextInner::System { .. } => Err(AppError::internal(
+                "reply is not available in event handler context",
+            )),
         }
     }
 
-    /// The sender's user ID. Available for message handlers only.
-    pub fn sender_id(&self) -> &str {
+    /// The sender's user ID. Available only in message handler context.
+    pub fn sender_id(&self) -> Result<&str> {
         match &self.inner {
-            ContextInner::Message(hc) => &hc.event.sender_id,
+            ContextInner::Message { event, .. } => Ok(&event.sender_id),
+            ContextInner::System { .. } => Err(AppError::internal(
+                "sender_id is not available in event handler context",
+            )),
         }
     }
 
-    /// The conversation / channel ID. Available for message handlers only.
-    pub fn cid(&self) -> &str {
+    /// The conversation / channel ID. Available only in message handler context.
+    pub fn cid(&self) -> Result<&str> {
         match &self.inner {
-            ContextInner::Message(hc) => &hc.event.cid,
+            ContextInner::Message { event, .. } => Ok(&event.cid),
+            ContextInner::System { .. } => Err(AppError::internal(
+                "cid is not available in event handler context",
+            )),
         }
     }
 
-    /// The plain text content of the message. Available for message handlers only.
-    pub fn text(&self) -> String {
+    /// The plain text content of the message. Available only in message handler context.
+    pub fn text(&self) -> Result<String> {
         match &self.inner {
-            ContextInner::Message(hc) => hc.event.plain_text(),
+            ContextInner::Message { event, .. } => Ok(event.plain_text()),
+            ContextInner::System { .. } => Err(AppError::internal(
+                "text is not available in event handler context",
+            )),
         }
     }
+
+    /// The raw message event. Available only in message handler context.
+    pub fn event(&self) -> Result<&MessageEvent> {
+        match &self.inner {
+            ContextInner::Message { event, .. } => Ok(event),
+            ContextInner::System { .. } => Err(AppError::internal(
+                "event is only available in message handler context",
+            )),
+        }
+    }
+
+    // -- System-only methods --
+
+    /// The system event type (e.g. "order_create"). Available only in event handler context.
+    pub fn event_type(&self) -> Result<&str> {
+        match &self.inner {
+            ContextInner::Message { .. } => Err(AppError::internal(
+                "event_type is only available in event handler context",
+            )),
+            ContextInner::System { event, .. } => Ok(&event.event_type),
+        }
+    }
+
+    /// The raw system event payload. Available only in event handler context.
+    pub fn payload(&self) -> Result<&serde_json::Value> {
+        match &self.inner {
+            ContextInner::Message { .. } => Err(AppError::internal(
+                "payload is only available in event handler context",
+            )),
+            ContextInner::System { event, .. } => Ok(&event.payload),
+        }
+    }
+
+    // -- Common methods --
 
     /// Access the adapter for sending messages.
     pub fn adapter(&self) -> &Arc<dyn BaseAdapter> {
         match &self.inner {
-            ContextInner::Message(hc) => &hc.adapter,
+            ContextInner::Message { adapter, .. } => adapter,
+            ContextInner::System { adapter, .. } => adapter,
         }
     }
 
     /// Access the shared application context.
     pub fn app_ctx(&self) -> &Arc<Ctx> {
         match &self.inner {
-            ContextInner::Message(hc) => &hc.app_ctx,
-        }
-    }
-
-    /// Access the raw message event (message handlers).
-    pub fn event(&self) -> &MessageEvent {
-        match &self.inner {
-            ContextInner::Message(hc) => &hc.event,
+            ContextInner::Message { app_ctx, .. } => app_ctx,
+            ContextInner::System { app_ctx, .. } => app_ctx,
         }
     }
 
     /// Access telemetry counters.
     pub fn telemetry(&self) -> &Arc<Telemetry> {
         match &self.inner {
-            ContextInner::Message(hc) => &hc.telemetry,
+            ContextInner::Message { telemetry, .. } => telemetry,
+            ContextInner::System { telemetry, .. } => telemetry,
         }
     }
 }

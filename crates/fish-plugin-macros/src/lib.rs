@@ -7,13 +7,33 @@ use syn::{
 
 // ---- Exported proc macros ----
 
+/// Extract the struct identifier from a token stream representing a struct item.
+fn extract_struct_ident(tokens: &proc_macro2::TokenStream) -> Ident {
+    let mut iter = tokens.clone().into_iter().peekable();
+    while let Some(token) = iter.next() {
+        if let proc_macro2::TokenTree::Ident(i) = &token {
+            if i == "struct" {
+                if let Some(proc_macro2::TokenTree::Ident(name)) = iter.next() {
+                    return name;
+                }
+            }
+        }
+    }
+    panic!("no struct definition found in #[plugin] item");
+}
+
 /// Attribute macro on the plugin struct: `#[plugin(id = "x", name = "y")]`
 ///
 /// Stores plugin metadata in a hidden module so `#[plugin_handlers]` can reference it.
+/// Also generates `create_initial_state()` which `#[plugin_handlers]` uses for state
+/// initialization. Supports `init = "Type::new()"` for custom initialization, otherwise
+/// uses `Default::default()`.
 #[proc_macro_attribute]
 pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let meta = parse_macro_input!(attr as PluginMeta);
-    let struct_item: proc_macro2::TokenStream = item.into();
+
+    let item: proc_macro2::TokenStream = item.into();
+    let struct_ident = extract_struct_ident(&item);
 
     let id = meta.id;
     let name = meta.name;
@@ -21,9 +41,30 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let description = meta.description;
     let author = meta.author;
 
+    let init_fn = match &meta.init {
+        Some(expr_str) => {
+            let expr: proc_macro2::TokenStream = expr_str
+                .parse()
+                .expect("invalid init expression in #[plugin]");
+            quote! {
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals)]
+                fn __fish_plugin_create_initial_state() -> #struct_ident { #expr }
+            }
+        }
+        None => {
+            quote! {
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals)]
+                fn __fish_plugin_create_initial_state() -> #struct_ident { #struct_ident::default() }
+            }
+        }
+    };
+
     let expanded = quote! {
-        #[derive(Default)]
-        #struct_item
+        #item
+
+        #init_fn
 
         #[doc(hidden)]
         mod __fish_plugin_meta {
@@ -131,7 +172,9 @@ pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn initial_state(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
-                Some(std::sync::Arc::new(tokio::sync::RwLock::new(Self::default())))
+                Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+                    __fish_plugin_create_initial_state(),
+                )))
             }
 
             fn message_handlers(&self) -> &[fish_plugin_sdk::MessageHandler] {
@@ -180,9 +223,13 @@ fn gen_message_handler(
                     let lock = plugin_state
                         .downcast::<tokio::sync::RwLock<#struct_name>>()
                         .expect("plugin_state type mismatch");
+                    let event = cx.event;
+                    let adapter = cx.adapter;
+                    let app_ctx = cx.app_ctx;
+                    let telemetry = cx.telemetry;
                     Box::pin(async move {
                         let mut plugin = lock.write().await;
-                        let ctx = fish_plugin_sdk::Context::new(cx);
+                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
                         plugin.#method_name(ctx).await
                     })
                 })
@@ -196,9 +243,13 @@ fn gen_message_handler(
                     let lock = plugin_state
                         .downcast::<tokio::sync::RwLock<#struct_name>>()
                         .expect("plugin_state type mismatch");
+                    let event = cx.event;
+                    let adapter = cx.adapter;
+                    let app_ctx = cx.app_ctx;
+                    let telemetry = cx.telemetry;
                     Box::pin(async move {
                         let plugin = lock.read().await;
-                        let ctx = fish_plugin_sdk::Context::new(cx);
+                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
                         plugin.#method_name(ctx).await
                     })
                 })
@@ -207,8 +258,12 @@ fn gen_message_handler(
         ReceiverKind::None | ReceiverKind::Owned => {
             quote! {
                 std::sync::Arc::new(move |cx: fish_plugin_sdk::HandlerContext| {
+                    let event = cx.event;
+                    let adapter = cx.adapter;
+                    let app_ctx = cx.app_ctx;
+                    let telemetry = cx.telemetry;
                     Box::pin(async move {
-                        let ctx = fish_plugin_sdk::Context::new(cx);
+                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
                         #struct_name::#method_name(ctx).await
                     })
                 })
@@ -454,6 +509,7 @@ struct PluginMeta {
     version: String,
     description: String,
     author: String,
+    init: Option<String>,
 }
 
 impl Parse for PluginMeta {
@@ -470,6 +526,7 @@ impl Parse for PluginMeta {
                 "version" => meta.version = s,
                 "description" => meta.description = s,
                 "author" => meta.author = s,
+                "init" => meta.init = Some(s),
                 _ => return Err(syn::Error::new(key.span(), format!("unknown plugin metadata key: {}", key))),
             }
             if !input.is_empty() {

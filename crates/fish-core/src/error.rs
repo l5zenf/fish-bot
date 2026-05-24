@@ -55,6 +55,10 @@ impl AppError {
     pub fn ws(message: impl Into<String>) -> Self {
         AppError::Ws { message: message.into() }
     }
+
+    pub fn internal(details: impl Into<String>) -> Self {
+        AppError::Internal { details: details.into() }
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ mod tests {
     #[test]
     fn s6_1_derive_plugin_metadata() {
         #[plugin(id = "test_derive", name = "Test Derive", version = "1.0", description = "a test", author = "me")]
+        #[derive(Default)]
         struct TestPlugin;
 
         #[plugin_handlers]
@@ -65,6 +66,7 @@ mod tests {
     #[test]
     fn s6_2_plugin_message_handler() {
         #[plugin(id = "msgh", name = "MsgH")]
+        #[derive(Default)]
         struct MsgPlugin;
 
         #[plugin_handlers]
@@ -83,6 +85,7 @@ mod tests {
     #[test]
     fn s6_3_plugin_multiple_handlers() {
         #[plugin(id = "multi", name = "Multi")]
+        #[derive(Default)]
         struct MultiPlugin;
 
         #[plugin_handlers]
@@ -104,6 +107,7 @@ mod tests {
     #[test]
     fn s6_4_plugin_event_handler() {
         #[plugin(id = "evt", name = "Evt")]
+        #[derive(Default)]
         struct EvtPlugin;
 
         #[plugin_handlers]
@@ -121,6 +125,7 @@ mod tests {
     #[test]
     fn s6_5_plugin_regex_and_fallback() {
         #[plugin(id = "rf", name = "RF")]
+        #[derive(Default)]
         struct RFPlugin;
 
         #[plugin_handlers]
@@ -139,6 +144,7 @@ mod tests {
     #[test]
     fn s6_6_plugin_empty_handlers() {
         #[plugin(id = "empty", name = "Empty")]
+        #[derive(Default)]
         struct EmptyPlugin;
 
         #[plugin_handlers]
@@ -152,6 +158,7 @@ mod tests {
     #[test]
     fn s6_7_plugin_with_registry() {
         #[plugin(id = "reg_derive", name = "RegDerive")]
+        #[derive(Default)]
         struct RegPlugin;
 
         #[plugin_handlers]

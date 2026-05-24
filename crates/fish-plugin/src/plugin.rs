@@ -127,16 +127,6 @@ pub struct HandlerContext {
     pub plugin_state: Option<Arc<dyn Any + Send + Sync>>,
 }
 
-impl HandlerContext {
-    /// Access the plugin's mutable state.
-    /// Returns None if the plugin is not stateful or if the type doesn't match.
-    pub fn state<T: Any + Send + Sync>(&self) -> Option<&parking_lot::RwLock<T>> {
-        self.plugin_state
-            .as_ref()?
-            .downcast_ref::<parking_lot::RwLock<T>>()
-    }
-}
-
 /// A pinned, boxed future returned by a handler function.
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
