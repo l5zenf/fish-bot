@@ -358,6 +358,7 @@ dependencies = [
  "fish-adapter",
  "fish-core",
  "fish-plugin",
+ "fish-runtime",
  "kameo",
  "tokio",
  "tracing",
@@ -398,6 +399,47 @@ dependencies = [
  "async-trait",
  "fish-adapter",
  "fish-core",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fish-plugin-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "fish-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fish-adapter",
+ "fish-core",
+ "fish-plugin",
+ "fish-plugin-macros",
+ "fish-runtime",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fish-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fish-adapter",
+ "fish-core",
+ "fish-plugin",
  "kameo",
  "parking_lot",
  "serde_json",

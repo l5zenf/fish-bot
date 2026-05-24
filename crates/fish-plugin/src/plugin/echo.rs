@@ -44,6 +44,7 @@ impl EchoPlugin {
                             tracing::info!("order_create event: {:?}", payload);
                             // 可以在这里发送通知、回复用户等
                             let _ = adapter.send("target_user", &MessageChain::from("感谢您的下单！"), None).await;
+                            Ok(())
                         })
                     })),
                 ]);
@@ -52,6 +53,7 @@ impl EchoPlugin {
                         Box::pin(async move {
                             tracing::info!("item_purchased event: {:?}", event.payload);
                             let _ = adapter.send("target_user", &MessageChain::from("商品已售出！"), None).await;
+                            Ok(())
                         })
                     })),
                 ]);
@@ -138,7 +140,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()), plugin_state: None }).await;
 
         assert_eq!(*captured.lock(), "Echo: /echo");
     }
@@ -187,7 +189,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()), plugin_state: None }).await;
 
         assert_eq!(*captured.lock(), "Echo: ");
         Ok(())
@@ -215,7 +217,7 @@ mod tests {
         let adapter: Arc<dyn BaseAdapter> = Arc::new(MockAdapter);
         let ctx = Arc::new(Ctx::new());
 
-        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()) }).await;
+        let _ = (handler.func)(HandlerContext { event, adapter, app_ctx: ctx, telemetry: Arc::new(fish_core::telemetry::Telemetry::new()), plugin_state: None }).await;
 
         assert_eq!(*captured.lock(), "Echo: hello");
         Ok(())

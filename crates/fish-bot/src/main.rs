@@ -9,7 +9,7 @@ use fish_core::ctx::Ctx;
 use fish_core::telemetry::Telemetry;
 mod bootstrap;
 use fish_plugin::loader::PluginManager;
-use fish_plugin::plugin::actor::PluginActor;
+use fish_runtime::PluginActor;
 use fish_plugin::plugin::echo::EchoPlugin;
 use fish_plugin::plugin::register_plugin;
 

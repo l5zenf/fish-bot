@@ -9,7 +9,7 @@ use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::message::{MessageChain, MessageSegment};
 use fish_core::telemetry::Telemetry;
-use fish_plugin::plugin::actor::{HandleEvent, HandleSystemEvent, PluginActor};
+use fish_runtime::{HandleEvent, HandleSystemEvent, PluginActor};
 use fish_plugin::plugin::RouteHint;
 
 /// A routing target resolved at startup — maps a route to a specific handler.

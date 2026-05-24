@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -38,6 +39,50 @@ impl Default for PluginMetadata {
     }
 }
 
+/// Capabilities a plugin may request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Capability {
+    /// Can make outbound HTTP requests.
+    Network,
+    /// Can read from the local filesystem.
+    FileSystem,
+    /// Can write to the local filesystem.
+    FileSystemWrite,
+    /// Can send messages through the adapter.
+    SendMessage,
+    /// Can read shared application context (Ctx).
+    ReadAppContext,
+}
+
+/// Per-plugin runtime configuration.
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    /// Maximum concurrent handler executions (semaphore permits).
+    pub concurrency: usize,
+    /// Default timeout for handler execution.
+    pub timeout: Duration,
+    /// Queue strategy when at capacity.
+    pub queue_strategy: QueueStrategy,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 64,
+            timeout: Duration::from_secs(5),
+            queue_strategy: QueueStrategy::default(),
+        }
+    }
+}
+
+/// Full plugin manifest — metadata + capabilities + runtime config.
+#[derive(Debug, Clone)]
+pub struct PluginManifest {
+    pub metadata: PluginMetadata,
+    pub capabilities: Vec<Capability>,
+    pub runtime: RuntimeConfig,
+}
+
 /// Route hint for Bot-level routing table.
 /// Allows Bot to pre-filter messages by text before dispatching to PluginActor.
 #[derive(Debug, Clone)]
@@ -55,7 +100,7 @@ pub enum RouteHint {
 }
 
 /// Queue strategy when a plugin's handler concurrency limit is reached.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueStrategy {
     /// Drop new events immediately when at capacity.
     DropNewest,
@@ -78,6 +123,18 @@ pub struct HandlerContext {
     pub adapter: Arc<dyn BaseAdapter>,
     pub app_ctx: Arc<Ctx>,
     pub telemetry: Arc<Telemetry>,
+    /// Plugin's mutable state (set for stateful plugins).
+    pub plugin_state: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl HandlerContext {
+    /// Access the plugin's mutable state.
+    /// Returns None if the plugin is not stateful or if the type doesn't match.
+    pub fn state<T: Any + Send + Sync>(&self) -> Option<&parking_lot::RwLock<T>> {
+        self.plugin_state
+            .as_ref()?
+            .downcast_ref::<parking_lot::RwLock<T>>()
+    }
 }
 
 /// A pinned, boxed future returned by a handler function.
@@ -177,7 +234,7 @@ impl MessageHandler {
 }
 
 /// A pinned, boxed future returned by an event handler function.
-pub type EventHandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+pub type EventHandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 /// Event handler function type — receives SystemEvent + adapter + ctx.
 pub type EventHandlerFunc = Arc<
@@ -229,6 +286,56 @@ pub trait Plugin: Send + Sync + 'static {
             None => true,
         })
     }
+
+    /// Return the full plugin manifest.
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            metadata: self.metadata().clone(),
+            capabilities: Vec::new(),
+            runtime: RuntimeConfig::default(),
+        }
+    }
+
+    /// Return the runtime configuration for this plugin.
+    fn runtime_config(&self) -> RuntimeConfig {
+        RuntimeConfig::default()
+    }
+
+    /// Return declared capabilities.
+    fn capabilities(&self) -> &[Capability] {
+        &[]
+    }
+
+    /// Create initial mutable state for this plugin.
+    /// Override in stateful plugins. Returns None for stateless plugins.
+    fn initial_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
+}
+
+/// A plugin that maintains mutable state across handler invocations.
+/// State lives inside the PluginActor, one instance per actor.
+///
+/// Implement this trait instead of `Plugin` for plugins with mutable state.
+pub trait StatefulPlugin: Plugin {
+    /// The state type this plugin maintains.
+    type State: Send + Sync + 'static;
+
+    /// Create the initial state.
+    fn create_initial_state(&self) -> Self::State;
+}
+
+/// Helper to implement `initial_state` for any `StatefulPlugin`.
+///
+/// Call this inside your `Plugin::initial_state()` override:
+/// ```ignore
+/// fn initial_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+///     Some(stateful_initial_state(self))
+/// }
+/// ```
+pub fn stateful_initial_state<P: StatefulPlugin>(plugin: &P) -> Arc<dyn Any + Send + Sync> {
+    let state = parking_lot::RwLock::new(plugin.create_initial_state());
+    Arc::new(state) as Arc<dyn Any + Send + Sync>
 }
 
 // ---- Global registry ----
@@ -356,7 +463,7 @@ mod tests {
 
     #[test]
     fn t2_20_event_handler_construct() -> anyhow::Result<()> {
-        let handler = EventHandler::new("test_event", Arc::new(|_, _, _| Box::pin(async {})));
+        let handler = EventHandler::new("test_event", Arc::new(|_, _, _| Box::pin(async { Ok(()) })));
         assert_eq!(handler.id, "test_event");
         assert!(handler.rule.is_none());
         Ok(())
@@ -371,7 +478,7 @@ mod tests {
             fn metadata(&self) -> &PluginMetadata { &self.meta }
             fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
                 let mut map = HashMap::new();
-                map.insert("notice".into(), vec![EventHandler::new("notice_handler", Arc::new(|_, _, _| Box::pin(async {})))]);
+                map.insert("notice".into(), vec![EventHandler::new("notice_handler", Arc::new(|_, _, _| Box::pin(async { Ok(()) })))]);
                 map
             }
         }
