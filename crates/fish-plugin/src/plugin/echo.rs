@@ -37,7 +37,7 @@ impl EchoPlugin {
             event_handlers: {
                 let mut map = HashMap::new();
                 map.insert("order_create".into(), vec![
-                    EventHandler::new("order_notify", Arc::new(|event, adapter, _ctx| {
+                    EventHandler::new("order_notify", Arc::new(|event, adapter, _ctx, _plugin_state| {
                         Box::pin(async move {
                             // event.payload 包含原始业务数据
                             let payload = &event.payload;
@@ -49,7 +49,7 @@ impl EchoPlugin {
                     })),
                 ]);
                 map.insert("item_purchased".into(), vec![
-                    EventHandler::new("purchase_notify", Arc::new(|event, adapter, _ctx| {
+                    EventHandler::new("purchase_notify", Arc::new(|event, adapter, _ctx, _plugin_state| {
                         Box::pin(async move {
                             tracing::info!("item_purchased event: {:?}", event.payload);
                             let _ = adapter.send("target_user", &MessageChain::from("商品已售出！"), None).await;

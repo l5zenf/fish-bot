@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn s3_2_builder_event_handler() {
         let plugin = PluginBuilder::new("evt", "Event")
-            .on_event("order_create", "notify", Arc::new(|_, _, _| {
+            .on_event("order_create", "notify", Arc::new(|_, _, _, _| {
                 Box::pin(async { Ok(()) })
             }))
             .build();

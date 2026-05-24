@@ -104,22 +104,23 @@ impl Message<HandleSystemEvent> for PluginActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let handlers = self.plugin().event_handlers();
+        let plugin_state = self.plugin_state.clone();
 
         // Collect Arc clones before handlers is dropped (lifetime issue with tokio::spawn)
-        let funcs: Vec<EventHandlerFunc> = match &msg.handler_id {
+        let funcs: Vec<(EventHandlerFunc, Option<Arc<dyn std::any::Any + Send + Sync>>)> = match &msg.handler_id {
             Some(hid) => handlers
                 .values()
                 .flatten()
                 .filter(|h| &h.id == hid)
-                .map(|h| Arc::clone(&h.func))
+                .map(|h| (Arc::clone(&h.func), plugin_state.clone()))
                 .collect(),
             None => handlers
                 .get(&msg.event.event_type)
-                .map(|v| v.iter().map(|h| Arc::clone(&h.func)).collect())
+                .map(|v| v.iter().map(|h| (Arc::clone(&h.func), plugin_state.clone())).collect())
                 .unwrap_or_default(),
         };
 
-        for func in funcs {
+        for (func, state) in funcs {
             let event = Arc::clone(&msg.event);
             let adapter = Arc::clone(&msg.adapter);
             let ctx = Arc::clone(&msg.ctx);
@@ -129,7 +130,7 @@ impl Message<HandleSystemEvent> for PluginActor {
             telemetry.handler_started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
-                let result = tokio::time::timeout(handler_timeout, (func)(event, adapter, ctx)).await;
+                let result = tokio::time::timeout(handler_timeout, (func)(event, adapter, ctx, state)).await;
                 match result {
                     Ok(Ok(())) => {
                         telemetry.handler_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

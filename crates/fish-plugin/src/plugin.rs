@@ -236,9 +236,14 @@ impl MessageHandler {
 /// A pinned, boxed future returned by an event handler function.
 pub type EventHandlerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
-/// Event handler function type — receives SystemEvent + adapter + ctx.
+/// Event handler function type — receives SystemEvent + adapter + ctx + plugin_state.
 pub type EventHandlerFunc = Arc<
-    dyn Fn(Arc<SystemEvent>, Arc<dyn BaseAdapter>, Arc<Ctx>) -> EventHandlerFuture + Send + Sync,
+    dyn Fn(
+        Arc<SystemEvent>,
+        Arc<dyn BaseAdapter>,
+        Arc<Ctx>,
+        Option<Arc<dyn Any + Send + Sync>>,
+    ) -> EventHandlerFuture + Send + Sync,
 >;
 
 /// An event handler registered by a plugin.
@@ -463,7 +468,7 @@ mod tests {
 
     #[test]
     fn t2_20_event_handler_construct() -> anyhow::Result<()> {
-        let handler = EventHandler::new("test_event", Arc::new(|_, _, _| Box::pin(async { Ok(()) })));
+        let handler = EventHandler::new("test_event", Arc::new(|_, _, _, _| Box::pin(async { Ok(()) })));
         assert_eq!(handler.id, "test_event");
         assert!(handler.rule.is_none());
         Ok(())
@@ -478,7 +483,7 @@ mod tests {
             fn metadata(&self) -> &PluginMetadata { &self.meta }
             fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
                 let mut map = HashMap::new();
-                map.insert("notice".into(), vec![EventHandler::new("notice_handler", Arc::new(|_, _, _| Box::pin(async { Ok(()) })))]);
+                map.insert("notice".into(), vec![EventHandler::new("notice_handler", Arc::new(|_, _, _, _| Box::pin(async { Ok(()) })))]);
                 map
             }
         }

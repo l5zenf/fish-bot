@@ -28,7 +28,7 @@ pub struct PluginActor {
     /// Notifier to wake the queue processor.
     queue_notify: Option<Arc<tokio::sync::Notify>>,
     /// Optional mutable plugin state (for stateful plugins).
-    plugin_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub(crate) plugin_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// A task queued for later processing when the plugin is at capacity.

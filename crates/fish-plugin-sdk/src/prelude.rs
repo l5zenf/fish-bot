@@ -5,7 +5,7 @@
 //! ```
 
 pub use crate::{
-    AppError, BaseAdapter, BuiltPlugin, Ctx, EventHandler, EventHandlerFunc, EventHandlerFuture,
+    AppError, BaseAdapter, BuiltPlugin, Context, Ctx, EventHandler, EventHandlerFunc, EventHandlerFuture,
     HandlerContext, HandlerFunc, HandlerFuture, MessageChain, MessageChainItem,
     MessageEvent, MessageHandler, MessageSegment, Plugin, PluginBuilder, PluginMetadata,
     QueueStrategy, Result, RouteHint, Rule, SystemEvent, Telemetry,
