@@ -10,7 +10,7 @@ use fish_core::telemetry::Telemetry;
 mod bootstrap;
 use fish_plugin::loader::PluginManager;
 use fish_runtime::PluginActor;
-use fish_plugin::plugin::echo::EchoPlugin;
+use fish_bot::echo_plugin::EchoPlugin;
 use fish_plugin::plugin::register_plugin;
 
 mod bot;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Register plugins
-    register_plugin(EchoPlugin::new());
+    register_plugin(EchoPlugin::default());
 
     // Load plugins into PluginManager
     let mut plugin_manager = PluginManager::new();

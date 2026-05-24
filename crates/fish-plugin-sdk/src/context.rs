@@ -33,7 +33,7 @@ pub(crate) enum ContextInner {
 
 impl Context {
     /// Create from a `HandlerContext` (message handlers).
-    pub(crate) fn new(
+    pub fn new(
         event: MessageEvent,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,
@@ -50,7 +50,7 @@ impl Context {
     }
 
     /// Create from a system event (event handlers).
-    pub(crate) fn new_from_event(
+    pub fn new_from_event(
         event: Arc<SystemEvent>,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,

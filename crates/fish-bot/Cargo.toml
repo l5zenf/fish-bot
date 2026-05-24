@@ -16,6 +16,7 @@ path = "src/main.rs"
 fish-core = { workspace = true }
 fish-adapter = { workspace = true }
 fish-plugin = { workspace = true }
+fish-plugin-sdk = { workspace = true }
 fish-runtime = { workspace = true }
 kameo = { workspace = true }
 tokio = { workspace = true }
@@ -25,3 +26,5 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

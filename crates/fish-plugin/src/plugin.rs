@@ -15,8 +15,6 @@ use fish_core::rule::{is_fullmatch, is_keywords, is_regex, is_startswith, Rule};
 use fish_core::telemetry::Telemetry;
 pub mod actor;
 
-pub mod echo;
-
 /// Plugin metadata.
 #[derive(Debug, Clone)]
 pub struct PluginMetadata {
