@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 
 use kameo::prelude::*;
 use tokio::sync::Semaphore;
@@ -21,8 +20,6 @@ pub struct PluginActor {
     handler_index: std::collections::HashMap<String, usize>,
     semaphore: Arc<Semaphore>,
     strategy: QueueStrategy,
-    /// Default timeout from the plugin's RuntimeConfig.
-    default_timeout: Duration,
     /// Shared queue for DropOldest strategy.
     pending_queue: Option<Arc<tokio::sync::Mutex<VecDeque<PendingTask>>>>,
     /// Notifier to wake the queue processor.
@@ -64,7 +61,6 @@ impl PluginActor {
             .collect();
 
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
-        let default_timeout = config.timeout;
         let plugin_state = plugin.initial_state();
 
         let (pending_queue, queue_notify) = match &config.queue_strategy {
@@ -145,7 +141,6 @@ impl PluginActor {
             handler_index,
             semaphore,
             strategy: config.queue_strategy,
-            default_timeout,
             pending_queue,
             queue_notify,
             plugin_state,
@@ -312,7 +307,7 @@ pub(crate) mod tests {
         MessageEvent::new("cid".into(), "uid".into(), "name".into(), MessageChain::from(text), serde_json::json!({}))
     }
 
-    use crate::messages::{HandleEvent, HandleSystemEvent};
+    use crate::messages::HandleEvent;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_5_actor_new() {

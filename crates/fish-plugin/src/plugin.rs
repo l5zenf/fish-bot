@@ -13,7 +13,7 @@ use fish_core::error::Result;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::rule::{is_fullmatch, is_keywords, is_regex, is_startswith, Rule};
 use fish_core::telemetry::Telemetry;
-pub mod actor;
+
 
 /// Plugin metadata.
 #[derive(Debug, Clone)]
@@ -351,7 +351,6 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fish_core::rule::Rule;
 
     struct TestPlugin {
         meta: PluginMetadata,
