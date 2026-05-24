@@ -73,7 +73,8 @@ struct SellerAssistant;
 impl SellerAssistant {
     #[command("/ping")]
     async fn ping(&self, ctx: Context) -> Result<()> {
-        ctx.reply("pong").await
+        ctx.reply("pong").await?;
+        Ok(())
     }
 }
 
@@ -120,15 +121,30 @@ impl Counter {
 
 `&mut self` 的 `incr` 自动串行化，同一时刻只有一个 handler 写入。`&self` 的 `read` 可以并发执行。
 
+### 自定义初始化
+
+`#[plugin]` 不自带 `Default` derive，需要用户显式添加，或通过 `init` 参数自定义：
+
+```rust
+#[plugin(id = "my_plugin", name = "My Plugin", init = "MyPlugin::new()")]
+struct MyPlugin {
+    count: u64,
+}
+
+impl MyPlugin {
+    fn new() -> Self { Self { count: 42 } }
+}
+```
+
 ### 命令属性
 
 `#[command(...)]` 支持多种匹配模式：
 
 ```rust
-#[command("/ping")]              // 精确匹配（默认）
-#[command("/admin", kind = "prefix")]  // 前缀匹配
-#[command(pattern = r"\d+", kind = "regex")]  // 正则匹配
-#[command(fallback)]             // 兜底（无其他 handler 匹配时执行）
+#[command("/ping")]                          // 精确匹配（默认）
+#[command("/admin", kind = "prefix")]        // 前缀匹配
+#[command(pattern = r"\d+", kind = "regex")] // 正则匹配
+#[command(fallback)]                         // 兜底（无其他 handler 匹配时执行）
 ```
 
 ### 关键词消息
@@ -142,42 +158,78 @@ async fn bargain(&mut self, ctx: Context) -> Result<()> {
 
 ### 事件处理
 
+事件处理器中 `ctx` 处于 System 上下文，调用消息相关方法（`text()`、`sender_id()`、`reply()`）会返回错误：
+
 ```rust
 #[event("order_create")]
-async fn on_order(&mut self, ctx: Context) -> Result<()> {
-    tracing::info!("new order: {:?}", ctx.event());
+async fn on_order(&self, ctx: Context) -> Result<()> {
+    tracing::info!("order event: {:?}", ctx.event_type()?);
+    if let Ok(payload) = ctx.payload() {
+        tracing::info!("payload: {:?}", payload);
+    }
     Ok(())
 }
 ```
 
 ## Context
 
-handler 统一接收 `Context`，提供便捷方法：
+handler 统一接收 `Context`，按当前上下文（Message / System）提供不同方法集：
+
+### 消息上下文方法（`#[command]` / `#[message]`）
 
 ```rust
-ctx.reply("hello").await?;          // 回复消息
-ctx.sender_id();                     // 发送者 ID
-ctx.cid();                           // 会话 ID
-ctx.text();                          // 消息纯文本
-ctx.adapter();                       // 发送消息的 adapter
-ctx.app_ctx();                       // 应用级依赖注入容器
-ctx.event();                         // 原始 MessageEvent
-ctx.telemetry();                     // 可观测指标
+ctx.reply("hello").await?;   // 回复消息
+ctx.sender_id()?;             // 发送者 ID
+ctx.cid()?;                   // 会话 ID
+ctx.text()?;                  // 消息纯文本
+ctx.event()?;                 // 原始 MessageEvent
 ```
+
+### 系统事件上下文方法（`#[event]`）
+
+```rust
+ctx.event_type()?;            // 事件类型（如 "order_create"）
+ctx.payload()?;               // 事件 JSON 载荷
+```
+
+### 通用方法
+
+```rust
+ctx.adapter();                // 发送消息的 adapter
+ctx.app_ctx();                // 应用级依赖注入容器
+ctx.telemetry();              // 可观测指标
+```
+
+消息上下文方法在系统事件中调用会返回 `AppError::Internal`，反之亦然。
+
+### Context 方法签名速查
+
+| 方法 | 返回值 | 可用上下文 |
+|---|---|---|
+| `reply(text)` | `Result<()>` | Message |
+| `sender_id()` | `Result<&str>` | Message |
+| `cid()` | `Result<&str>` | Message |
+| `text()` | `Result<String>` | Message |
+| `event()` | `Result<&MessageEvent>` | Message |
+| `event_type()` | `Result<&str>` | System |
+| `payload()` | `Result<&Value>` | System |
+| `adapter()` | `&Arc<dyn BaseAdapter>` | 通用 |
+| `app_ctx()` | `&Arc<Ctx>` | 通用 |
+| `telemetry()` | `&Arc<Telemetry>` | 通用 |
 
 ## PluginBuilder（免 macro 方式）
 
-适合动态注册或简单插件，效果完全等价于 proc macro：
+适合动态注册或简单插件。Builder 中直接操作 `HandlerContext`，不经过 `Context` 封装：
 
 ```rust
 use fish_plugin_sdk::prelude::*;
 use std::sync::Arc;
 
 PluginBuilder::new("echo", "Echo")
-    .command("echo", "/echo", Arc::new(|ctx: fish_plugin_sdk::HandlerContext| {
+    .command("echo", "/echo", Arc::new(|cx: HandlerContext| {
         Box::pin(async move {
-            let ctx = fish_plugin_sdk::Context::new(ctx);
-            ctx.reply(ctx.text()).await
+            cx.event.reply(MessageSegment::text("echo!")).await;
+            Ok(())
         })
     }))
     .build()
@@ -186,16 +238,23 @@ PluginBuilder::new("echo", "Echo")
 
 ### 有状态 + Builder
 
+Builder 通过 `.state()` 传入初始状态，handler 中手动 downcast 访问：
+
 ```rust
+use std::sync::Arc;
+use fish_plugin_sdk::prelude::*;
+
 PluginBuilder::new("counter", "Counter")
     .state(0u64)
-    .command("incr", "/incr", Arc::new(|ctx: HandlerContext| {
+    .command("incr", "/incr", Arc::new(|cx: HandlerContext| {
         Box::pin(async move {
-            let plugin_state = ctx.plugin_state.clone().expect("stateful");
-            let lock = plugin_state.downcast::<tokio::sync::RwLock<u64>>().expect("type");
-            let mut val = lock.write().await;
+            let plugin_state = cx.plugin_state.clone().expect("stateful plugin");
+            let lock = plugin_state
+                .downcast::<parking_lot::RwLock<u64>>()
+                .expect("state type mismatch");
+            let mut val = lock.write();
             *val += 1;
-            ctx.event.reply(MessageSegment::text(format!("Count: {}", *val))).await;
+            cx.event.reply(MessageSegment::text(format!("Count: {}", *val))).await;
             Ok(())
         })
     }))
