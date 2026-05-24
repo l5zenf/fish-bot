@@ -673,7 +673,7 @@ impl FishAPI {
 impl Clone for FishAPI {
     fn clone(&self) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: self.client.clone(),
             auth: self.auth.clone(),
             device_id: self.device_id.clone(),
             poll_params: Mutex::new(None),

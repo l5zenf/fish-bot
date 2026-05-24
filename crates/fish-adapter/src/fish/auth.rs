@@ -186,7 +186,7 @@ impl AuthManager {
 impl Clone for AuthManager {
     fn clone(&self) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: self.client.clone(),
             cookies: self.cookies.clone(),
             device_id: self.device_id.clone(),
             data_dir: self.data_dir.clone(),
