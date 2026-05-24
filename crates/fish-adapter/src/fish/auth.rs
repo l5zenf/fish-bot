@@ -145,9 +145,11 @@ impl AuthManager {
     }
 
     /// Perform QR code login — returns the cookies dict.
+    /// Delegates to FishAPI which handles the full QR flow (generate, display, poll).
     pub async fn qrcode_login(&mut self) -> Result<HashMap<String, String>> {
-        // QR login is now orchestrated at the adapter level
-        Err(AppError::auth("QR code login not implemented"))
+        let api = super::api::FishAPI::new(self.clone());
+        api.ensure_auth().await?;
+        Ok(self.get_cookies().await)
     }
 
     #[cfg(test)]
@@ -162,18 +164,17 @@ impl AuthManager {
         }
     }
 
-    /// Ensure we have valid auth, logging in if necessary.
+    /// Create AuthManager from local cookies. If no cookies found,
+    /// call `qrcode_login()` to initiate QR login flow.
     pub async fn from_local_or_qr_login() -> Result<Self> {
-        let auth = Self::new();
-
-        // If we have no cookies, try QR login
+        let mut auth = Self::new();
         {
             let cookies = auth.cookies.lock().await;
             if cookies.is_empty() {
-                // Will drop lock before QR login
+                drop(cookies);
+                auth.qrcode_login().await?;
             }
         }
-
         Ok(auth)
     }
 
@@ -392,14 +393,8 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn t3_48_qrcode_login_returns_err() -> anyhow::Result<()> {
-        let dir = temp_auth_dir()?;
-        let mut auth = AuthManager::test_new(dir);
-        let result = auth.qrcode_login().await;
-        assert!(result.is_err(), "qrcode_login should return error (not implemented)");
-        Ok(())
-    }
+    // t3_48 removed: qrcode_login now delegates to FishAPI which makes HTTP calls.
+    // QR login tests are integration-level and require network access.
 
     #[tokio::test]
     async fn t3_49_refresh_if_needed_returns_ok() -> anyhow::Result<()> {
