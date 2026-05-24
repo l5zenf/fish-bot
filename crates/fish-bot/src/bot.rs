@@ -10,7 +10,7 @@ use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::message::{MessageChain, MessageSegment};
 use fish_core::telemetry::Telemetry;
 use fish_runtime::{HandleEvent, HandleSystemEvent, PluginActor};
-use fish_plugin::plugin::RouteHint;
+use fish_plugin::RouteHint;
 
 /// A routing target resolved at startup — maps a route to a specific handler.
 #[derive(Clone)]
@@ -42,7 +42,7 @@ pub struct Bot {
 impl Bot {
     pub fn new(
         adapter: Arc<dyn BaseAdapter>,
-        plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)>,
+        plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::Plugin>)>,
         ctx: Arc<Ctx>,
         telemetry: Arc<Telemetry>,
     ) -> Self {
@@ -270,7 +270,7 @@ mod tests {
     use fish_core::error::{AppError, Result};
     use fish_core::rule::is_fullmatch;
     use fish_core::telemetry::Telemetry;
-    use fish_plugin::plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
+    use fish_plugin::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use kameo::actor::Spawn;
 

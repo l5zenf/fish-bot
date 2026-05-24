@@ -7,7 +7,7 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
-use fish_plugin::plugin::{EventHandlerFunc, RouteHint};
+use fish_plugin::{EventHandlerFunc, RouteHint};
 
 use crate::actor::PluginActor;
 
@@ -38,7 +38,7 @@ impl Message<HandleEvent> for PluginActor {
         // Fallback (handler_id=None): scan all handlers with rule checks.
         let handlers = self.plugin().message_handlers();
 
-        let matched_handlers: Vec<&fish_plugin::plugin::MessageHandler> = match &msg.handler_id {
+        let matched_handlers: Vec<&fish_plugin::MessageHandler> = match &msg.handler_id {
             Some(hid) => {
                 // Bot-routed to a specific handler
                 match self.handler_index().get(hid).and_then(|&idx| handlers.get(idx)) {

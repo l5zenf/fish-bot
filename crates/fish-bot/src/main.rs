@@ -11,7 +11,7 @@ mod bootstrap;
 use fish_plugin::loader::PluginManager;
 use fish_runtime::PluginActor;
 use fish_bot::echo_plugin::EchoPlugin;
-use fish_plugin::plugin::register_plugin;
+use fish_plugin::register_plugin;
 
 mod bot;
 use bot::{Bot, DispatchEvent, DispatchSystemEvent};
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     plugin_manager.load_all_plugins();
 
     // Spawn each plugin as an isolated kameo actor
-    let mut plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::plugin::Plugin>)> = Vec::new();
+    let mut plugin_refs: Vec<(ActorRef<PluginActor>, Arc<dyn fish_plugin::Plugin>)> = Vec::new();
     let plugin_count = plugin_manager.plugins.len();
     for (id, plugin) in &plugin_manager.plugins {
         let actor_ref = PluginActor::spawn(PluginActor::new(Arc::clone(plugin)));

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::plugin::Plugin;
+use crate::Plugin;
 
 /// Plugin manager.
 pub struct PluginManager {
@@ -17,7 +17,7 @@ impl PluginManager {
 
     /// Load all plugins — discovers globally registered plugins.
     pub fn load_all_plugins(&mut self) {
-        let registered = crate::plugin::registered_plugins();
+        let registered = crate::registered_plugins();
         for plugin in registered {
             let meta = plugin.metadata();
             let name = meta.id.clone();
@@ -53,7 +53,7 @@ impl Default for PluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{register_plugin, Plugin, PluginMetadata};
+    use crate::{register_plugin, Plugin, PluginMetadata};
 
     struct TestPluginA {
         meta: PluginMetadata,

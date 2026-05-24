@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fish_plugin::plugin::{
+use fish_plugin::{
     Capability, EventHandler, EventHandlerFunc, HandlerFunc, MessageHandler, Plugin,
     PluginMetadata, QueueStrategy, RuntimeConfig,
 };
@@ -239,7 +239,7 @@ impl Plugin for BuiltPlugin {
 impl BuiltPlugin {
     /// Register this plugin in the global plugin registry.
     pub fn register(self) {
-        fish_plugin::plugin::register_plugin(self);
+        fish_plugin::register_plugin(self);
     }
 }
 
@@ -249,7 +249,7 @@ mod tests {
     use std::sync::Arc;
     use fish_core::event::MessageEvent;
     use fish_core::message::MessageChain;
-    use fish_plugin::plugin::HandlerContext;
+    use fish_plugin::HandlerContext;
 
     #[test]
     fn s3_1_builder_single_command() {
@@ -313,7 +313,7 @@ mod tests {
             .build();
 
         plugin.register();
-        let plugins = fish_plugin::plugin::registered_plugins();
+        let plugins = fish_plugin::registered_plugins();
         assert!(plugins.iter().any(|p| p.metadata().id == "reg"));
     }
 
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn s4_1_builder_capability() {
-        use fish_plugin::plugin::Capability;
+        use fish_plugin::Capability;
         let plugin = PluginBuilder::new("cap", "CapTest")
             .capability(Capability::Network)
             .capability(Capability::SendMessage)
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn s4_2_builder_runtime_config() {
-        use fish_plugin::plugin::QueueStrategy;
+        use fish_plugin::QueueStrategy;
         let plugin = PluginBuilder::new("rt", "RTTest")
             .concurrency(8)
             .timeout(Duration::from_secs(3))

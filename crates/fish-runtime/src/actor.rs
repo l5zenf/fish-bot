@@ -8,7 +8,7 @@ use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use fish_core::telemetry::Telemetry;
-use fish_plugin::plugin::{HandlerContext, MessageHandler, Plugin, QueueStrategy, RuntimeConfig};
+use fish_plugin::{HandlerContext, MessageHandler, Plugin, QueueStrategy, RuntimeConfig};
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
@@ -30,7 +30,7 @@ pub struct PluginActor {
 
 /// A task queued for later processing when the plugin is at capacity.
 pub(super) struct PendingTask {
-    pub(super) func: fish_plugin::plugin::HandlerFunc,
+    pub(super) func: fish_plugin::HandlerFunc,
     pub(super) handler_id: String,
     pub(super) handler_timeout: std::time::Duration,
     pub(super) plugin_id: String,
@@ -269,7 +269,7 @@ pub(crate) mod tests {
     use fish_core::message::{MessageChain, MessageSegment};
     use fish_core::rule::is_fullmatch;
     use fish_core::telemetry::Telemetry;
-    use fish_plugin::plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
+    use fish_plugin::{MessageHandler, Plugin, PluginMetadata, RouteHint};
     use kameo::actor::Spawn;
 
     struct MockAdapter;

@@ -24,7 +24,7 @@ pub use fish_core::telemetry::Telemetry;
 
 pub use fish_adapter::adapter::BaseAdapter;
 
-pub use fish_plugin::plugin::{
+pub use fish_plugin::{
     Capability, EventHandler, EventHandlerFunc, EventHandlerFuture, HandlerContext, HandlerFunc,
     HandlerFuture, MessageHandler, Plugin, PluginManifest, PluginMetadata, QueueStrategy,
     RouteHint, RuntimeConfig, StatefulPlugin, stateful_initial_state,
