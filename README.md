@@ -18,7 +18,7 @@
 ```text
 crates/
   fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
-  fish-runtime        运行时编排：RuntimeHost / Bot / PluginActor / PluginBuilder / 默认 Fish 适配器
+  fish-runtime        运行时编排：RuntimeHost / Bot / PluginActor / ActorPluginBuilder / 默认 Fish 适配器
   fish-plugin-macros  #[plugin] / #[message] / #[event]
 
 examples/
@@ -248,7 +248,7 @@ async fn write(&mut self, ctx: MessageContext) -> Result<()> { ... }
   - 写状态
   - 在单插件 actor 内串行化
 
-如果你想写无状态、纯 actor 心智模型的 handler，不走宏，直接使用 `PluginBuilder`。
+如果你想写真正的 actor-first 插件，不走宏，直接使用 `ActorPluginBuilder`。
 
 这也是当前推荐的“功能内聚，一个插件 struct 承载自己的状态和行为”的用法。
 
@@ -330,67 +330,64 @@ impl Counter {
 }
 ```
 
-### 方式二：用 `PluginBuilder` 显式管理状态
+### 方式二：用 `ActorPluginBuilder` 走 actor-first 范式
 
-适合程序化构建插件，或者不方便使用 proc macro 的场景：
+适合你希望插件就是 actor、本身有 mailbox、有 typed message、有 `ask` / `tell` 心智的场景：
 
 ```rust
-use std::sync::Arc;
-
 use fish_runtime::prelude::*;
+use kameo::Actor;
+use kameo::message::{Context, Message};
 
-let plugin = PluginBuilder::new("counter", "Counter")
-    .state(0u64)
-    .command("incr", "/incr", Arc::new(|cx: HandlerContext| {
-        Box::pin(async move {
-            let state = cx.state::<u64>()?;
-            let mut value = state.write().await;
-            *value += 1;
-            cx.reply(format!("value={}", *value)).await?;
-            Ok(())
-        })
-    }))
+#[derive(Actor)]
+struct CounterActor {
+    value: u64,
+}
+
+struct Incr(MessageContext);
+struct CurrentValue;
+
+impl Message<Incr> for CounterActor {
+    type Reply = Result<()>;
+
+    async fn handle(&mut self, msg: Incr, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.value += 1;
+        msg.0.reply(format!("value={}", self.value)).await
+    }
+}
+
+impl Message<CurrentValue> for CounterActor {
+    type Reply = u64;
+
+    async fn handle(
+        &mut self,
+        _msg: CurrentValue,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.value
+    }
+}
+
+let plugin = ActorPluginBuilder::new("counter", "Counter", || CounterActor { value: 0 })
+    .on_message("incr", "/incr", Incr)
     .build();
 ```
 
-这里的 typed state 底层是 `tokio::sync::RwLock<T>`。
+这条路的重点不是“再包一层 handler 闭包”，而是：
 
-也就是说：
+- 你定义的是 actor 本身
+- 路由只负责把 `MessageContext` / `EventContext` 映射成 typed message
+- 插件内部状态在 actor 里，不在 `RwLock<T>` 里
+- 需要时可以直接拿 `actor_ref()` 做 `ask` / `tell`
 
-- 不需要在宿主里堆全局变量
-- 不需要手写一层层 `Any` downcast
-- 不需要到处塞 `Mutex`
+## ActorPluginBuilder
 
-## PluginBuilder
+`ActorPluginBuilder` 的价值在于：
 
-如果你更喜欢显式组装，也可以完全不使用宏：
-
-```rust
-use std::sync::Arc;
-use std::time::Duration;
-
-use fish_runtime::prelude::*;
-
-let plugin = PluginBuilder::new("echo", "Echo")
-    .description("builder style plugin")
-    .capability(Capability::SendMessage)
-    .timeout(Duration::from_secs(10))
-    .concurrency(16)
-    .queue_strategy(QueueStrategy::DropOldest(128))
-    .command("ping", "/ping", Arc::new(|cx: HandlerContext| {
-        Box::pin(async move {
-            cx.reply("pong").await?;
-            Ok(())
-        })
-    }))
-    .build();
-```
-
-`PluginBuilder` 的价值在于：
-
-- 适合动态装配
-- 适合桥接外部配置
-- 适合在不引入 proc macro 的场景下集成 runtime
+- 让插件作者直接写 `kameo` actor 和 typed message
+- 让 runtime 只负责 route -> actor message 的转发
+- 保留运行时的 metadata、telemetry、timeout、queue 配置
+- 不需要为了 actor 插件再退回到“注册一组闭包”
 
 ## 共享依赖注入
 

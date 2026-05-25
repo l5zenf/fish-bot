@@ -96,7 +96,7 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                     if matches!(receiver, ReceiverKind::None | ReceiverKind::Owned) {
                         return syn::Error::new(
                             method.sig.ident.span(),
-                            "macro-based plugin handlers must use `&self` or `&mut self`; use PluginBuilder for actor-style stateless handlers",
+                            "macro-based plugin handlers must use `&self` or `&mut self`; use ActorPluginBuilder for actor-first plugins",
                         )
                         .to_compile_error()
                         .into();

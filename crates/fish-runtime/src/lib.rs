@@ -13,7 +13,7 @@ pub mod prelude;
 
 pub use bot::{Bot, DispatchEvent, DispatchSystemEvent};
 pub use actor::PluginActor;
-pub use builder::{BuiltPlugin, PluginBuilder};
+pub use builder::{ActorMailbox, ActorPlugin, ActorPluginBuilder};
 pub use context::{EventContext, MessageContext};
 pub use fish::FishWebSocketAdapter;
 pub use host::RuntimeHost;
