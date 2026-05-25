@@ -12,6 +12,66 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use urlencoding;
 
+fn build_mtop_params<'a>(
+    api: &'a str,
+    version: &'a str,
+    t: &'a str,
+    sign: &'a str,
+    extra_params: Option<&'a HashMap<String, String>>,
+) -> HashMap<&'a str, &'a str> {
+    let mut params = HashMap::new();
+    params.insert("jsv", "2.7.2");
+    params.insert("appKey", "34839810");
+    params.insert("t", t);
+    params.insert("sign", sign);
+    params.insert("v", version);
+    params.insert("type", "originaljson");
+    params.insert("accountSite", "xianyu");
+    params.insert("dataType", "json");
+    params.insert("timeout", "20000");
+    params.insert("api", api);
+    params.insert("sessionOption", "AutoLoginOnly");
+    params.insert("spm_cnt", "a21ybx.im.0.0");
+
+    if let Some(extra) = extra_params {
+        for (k, v) in extra {
+            params.insert(k.as_str(), v.as_str());
+        }
+    }
+
+    params
+}
+
+fn build_has_login_query() -> [(&'static str, &'static str); 2] {
+    [("appName", "xianyu"), ("fromSite", "77")]
+}
+
+fn build_has_login_form(cookies: &HashMap<String, String>) -> HashMap<&'static str, String> {
+    HashMap::from([
+        ("hid", cookies.get("unb").cloned().unwrap_or_default()),
+        ("ltl", "true".to_string()),
+        ("appName", "xianyu".to_string()),
+        ("appEntrance", "web".to_string()),
+        (
+            "_csrf_token",
+            cookies.get("XSRF-TOKEN").cloned().unwrap_or_default(),
+        ),
+        ("umidToken", String::new()),
+        ("hsiz", cookies.get("cookie2").cloned().unwrap_or_default()),
+        ("bizParams", "taobaoBizLoginFrom=web".to_string()),
+        ("mainPage", "false".to_string()),
+        ("isMobile", "false".to_string()),
+        ("lang", "zh_CN".to_string()),
+        ("returnUrl", String::new()),
+        ("fromSite", "77".to_string()),
+        ("isIframe", "true".to_string()),
+        ("documentReferer", "https://www.goofish.com/".to_string()),
+        ("defaultView", "hasLogin".to_string()),
+        ("umidTag", "SERVER".to_string()),
+        ("deviceId", cookies.get("cna").cloned().unwrap_or_default()),
+    ])
+}
+
 /// Fish API client wrapping the MTOP (Mobile Taobao Open Platform) protocol.
 pub(crate) struct FishAPI {
     client: reqwest::Client,
@@ -104,23 +164,7 @@ impl FishAPI {
             String::new()
         };
 
-        let mut params = HashMap::new();
-        params.insert("jsv", "2.7.2");
-        params.insert("appKey", "34839810");
-        params.insert("t", &t_str);
-        params.insert("sign", &sign);
-        params.insert("v", version);
-        params.insert("type", "originaljson");
-        params.insert("dataType", "json");
-        params.insert("api", api);
-        params.insert("timeout", "20000");
-        params.insert("sessionOption", "AutoLoginOnly");
-
-        if let Some(extra) = extra_params {
-            for (k, v) in extra {
-                params.insert(k, v);
-            }
-        }
+        let params = build_mtop_params(api, version, &t_str, &sign, extra_params);
 
         let url = format!(
             "https://h5api.m.goofish.com/h5/{}/{}",
@@ -212,6 +256,25 @@ impl FishAPI {
         .await
     }
 
+    pub async fn has_login(&self) -> Result<bool> {
+        let cookies = self.auth.get_cookies().await;
+        let response = self
+            .client
+            .post("https://passport.goofish.com/newlogin/hasLogin.do")
+            .query(&build_has_login_query())
+            .form(&build_has_login_form(&cookies))
+            .send()
+            .await
+            .map_err(http_err)?;
+
+        let body: Value = response.json().await.map_err(http_err)?;
+        Ok(body
+            .get("content")
+            .and_then(|content| content.get("success"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false))
+    }
+
     pub async fn get_access_token(&self) -> Result<String> {
         let res = self.get_token().await?;
         res.get("data")
@@ -226,6 +289,19 @@ impl FishAPI {
             "mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get",
             "1.0",
             &serde_json::json!({}),
+            None,
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_item_info(&self, item_id: &str) -> Result<Value> {
+        self.call_mtop(
+            "mtop.taobao.idle.pc.detail",
+            "1.0",
+            &serde_json::json!({
+                "itemId": item_id,
+            }),
             None,
         )
         .await
@@ -502,6 +578,23 @@ impl FishAPI {
 
         if cookies.contains_key("unb") {
             tracing::info!("Found local auth cookies, validating...");
+            match self.has_login().await {
+                Ok(true) => {
+                    tracing::debug!("hasLogin.do confirmed current cookies are still valid");
+                }
+                Ok(false) => {
+                    tracing::warn!("hasLogin.do reported cookies are no longer valid");
+                    self.auth.rm_auth_file().await;
+                    {
+                        let mut c = self.auth.cookies.lock().await;
+                        c.clear();
+                    }
+                    return self.qrcode_login_flow().await;
+                }
+                Err(e) => {
+                    tracing::warn!("hasLogin.do failed: {}, falling back to token validation", e);
+                }
+            }
             match self.get_token().await {
                 Ok(res) => {
                     let has_access_token = res
@@ -727,6 +820,47 @@ mod tests {
             "encoded form should be longer than raw UTF-8"
         );
         Ok(())
+    }
+
+    #[test]
+    fn t3_46b_build_mtop_params_matches_reference_defaults() {
+        let mut extra = HashMap::new();
+        extra.insert("spm_pre".to_string(), "a21ybx.item.want.1.demo".to_string());
+        extra.insert("log_id".to_string(), "demo".to_string());
+
+        let params = build_mtop_params(
+            "mtop.taobao.idlemessage.pc.login.token",
+            "1.0",
+            "1700000000000",
+            "deadbeef",
+            Some(&extra),
+        );
+
+        assert_eq!(params.get("accountSite"), Some(&"xianyu"));
+        assert_eq!(params.get("spm_cnt"), Some(&"a21ybx.im.0.0"));
+        assert_eq!(params.get("spm_pre"), Some(&"a21ybx.item.want.1.demo"));
+        assert_eq!(params.get("log_id"), Some(&"demo"));
+    }
+
+    #[test]
+    fn t3_46c_build_has_login_request_matches_reference_shape() {
+        let cookies = HashMap::from([
+            ("unb".to_string(), "user-1".to_string()),
+            ("XSRF-TOKEN".to_string(), "csrf-1".to_string()),
+            ("cookie2".to_string(), "cookie2-1".to_string()),
+            ("cna".to_string(), "device-1".to_string()),
+        ]);
+
+        let query = build_has_login_query();
+        let form = build_has_login_form(&cookies);
+
+        assert_eq!(query, [("appName", "xianyu"), ("fromSite", "77")]);
+        assert_eq!(form.get("hid"), Some(&"user-1".to_string()));
+        assert_eq!(form.get("_csrf_token"), Some(&"csrf-1".to_string()));
+        assert_eq!(form.get("hsiz"), Some(&"cookie2-1".to_string()));
+        assert_eq!(form.get("deviceId"), Some(&"device-1".to_string()));
+        assert_eq!(form.get("defaultView"), Some(&"hasLogin".to_string()));
+        assert_eq!(form.get("bizParams"), Some(&"taobaoBizLoginFrom=web".to_string()));
     }
 
     #[tokio::test]

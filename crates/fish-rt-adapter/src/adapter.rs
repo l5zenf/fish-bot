@@ -23,6 +23,73 @@ use fish_core::BaseAdapter;
 
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+fn decode_sync_payload(raw_data: &str) -> Option<Value> {
+    if decrypt(raw_data).is_ok() {
+        return None;
+    }
+    let decoded = STANDARD.decode(raw_data.as_bytes()).ok()?;
+    rmp_serde::from_slice::<Value>(&decoded).ok()
+}
+
+fn should_fallback_to_reminder_content(segments: &[MessageSegment]) -> bool {
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            matches!(
+                segment,
+                MessageSegment::CustomNode { desc, .. } if desc.is_empty()
+            )
+        })
+}
+
+fn is_chat_message(payload: &Value) -> bool {
+    payload
+        .get("1")
+        .and_then(|v| v.as_object())
+        .and_then(|body| body.get("10"))
+        .and_then(|v| v.as_object())
+        .and_then(|sender| sender.get("reminderContent"))
+        .and_then(|v| v.as_str())
+        .is_some()
+}
+
+fn is_bracket_system_message(message: &str) -> bool {
+    let clean = message.trim();
+    !clean.is_empty() && clean.starts_with('[') && clean.ends_with(']')
+}
+
+fn build_send_message(
+    target_id: &str,
+    message: &MessageChain,
+    cid: Option<&str>,
+    my_id: &str,
+) -> Result<Value> {
+    let (payload, custom_type) = encode_chain(message.segments())?;
+    let encoded_data = STANDARD.encode(serde_json::to_string(&payload)?.as_bytes());
+    let cid = cid.unwrap_or(target_id);
+
+    Ok(serde_json::json!({
+        "lwp": "/r/MessageSend/sendByReceiverScope",
+        "headers": { "mid": generate_mid() },
+        "body": [
+            {
+                "uuid": generate_uuid(),
+                "cid": format!("{}@goofish", cid),
+                "conversationType": 1,
+                "content": {
+                    "contentType": 101,
+                    "custom": { "type": custom_type, "data": encoded_data }
+                },
+                "redPointPolicy": 0,
+                "extension": { "extJson": "{}" },
+                "ctx": { "appVersion": "1.0", "platform": "web" },
+                "mtags": {},
+                "msgReadStatusSetting": 1,
+            },
+            { "actualReceivers": [format!("{}@goofish", target_id), format!("{}@goofish", my_id)] }
+        ]
+    }))
+}
+
 /// Thin coordinator: ties together FishAPI (HTTP auth) and FishConnection (WS transport).
 pub struct FishWebSocketAdapter {
     api: FishAPI,
@@ -130,27 +197,11 @@ impl FishWebSocketAdapter {
                 None => continue,
             };
 
-            // Try to decrypt: plaintext base64 -> JSON, then fallback to msgpack route
-            let decrypted = match decrypt(raw_data) {
-                Ok(v) => v,
-                Err(_) => {
-                    match STANDARD.decode(raw_data.as_bytes()) {
-                        Ok(bytes) => {
-                            // Try JSON first (plaintext)
-                            match serde_json::from_slice(&bytes) {
-                                Ok(v) => v,
-                                Err(_) => {
-                                    // Try MessagePack (encrypted business events)
-                                    match rmp_serde::from_slice::<serde_json::Value>(&bytes) {
-                                        Ok(mp_val) => mp_val,
-                                        Err(_) => continue,
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => continue,
-                    }
-                }
+            // Reference implementation ignores plain JSON sync payloads and only
+            // processes MessagePack business events here.
+            let decrypted = match decode_sync_payload(raw_data) {
+                Some(value) => value,
+                None => continue,
             };
 
             // Parse decrypted message into MessageEvent
@@ -183,6 +234,10 @@ impl FishWebSocketAdapter {
 
     /// Parse a decrypted payload into a MessageEvent.
     async fn parse_event(self: &Arc<Self>, payload: &Value) -> Option<MessageEvent> {
+        if !is_chat_message(payload) {
+            return None;
+        }
+
         let body = payload
             .get("1")
             .or_else(|| payload.get("body"))
@@ -229,14 +284,27 @@ impl FishWebSocketAdapter {
                 .or_else(|| payload.get("messages"))
         });
 
+        let reminder_content = sender_field
+            .and_then(|s| s.get("reminderContent"))
+            .and_then(|v| v.as_str());
+
         let segments = match content {
-            Some(c) => decode_content(c).unwrap_or_default(),
+            Some(c) => {
+                let decoded = decode_content(c).unwrap_or_default();
+                if decoded.is_empty() || should_fallback_to_reminder_content(&decoded) {
+                    match reminder_content {
+                        Some(text) => vec![MessageSegment::Text {
+                            text: text.to_string(),
+                        }],
+                        None => decoded,
+                    }
+                } else {
+                    decoded
+                }
+            }
             None => {
                 // Fallback: extract text from message["1"]["10"]["reminderContent"]
-                match sender_field
-                    .and_then(|s| s.get("reminderContent"))
-                    .and_then(|v| v.as_str())
-                {
+                match reminder_content {
                     Some(text) => vec![MessageSegment::Text {
                         text: text.to_string(),
                     }],
@@ -246,6 +314,9 @@ impl FishWebSocketAdapter {
         };
 
         let messages = MessageChain::from(segments);
+        if messages.is_empty() || is_bracket_system_message(&messages.plain_text()) {
+            return None;
+        }
 
         // Skip messages from self
         let my_id = self.api.my_id().await;
@@ -286,33 +357,8 @@ impl Clone for FishWebSocketAdapter {
 #[async_trait]
 impl BaseAdapter for FishWebSocketAdapter {
     async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
-        let (payload, custom_type) = encode_chain(message.segments())?;
-        let encoded_data = STANDARD.encode(serde_json::to_string(&payload)?.as_bytes());
-        let _cid = cid.unwrap_or(target_id);
         let my_id = self.api.my_id().await;
-
-        let msg = serde_json::json!({
-            "lwp": "/r/MessageSend/sendByReceiverScope",
-            "headers": { "mid": generate_mid() },
-            "body": [
-                {
-                    "uuid": generate_uuid(),
-                    "cid": format!("{}@goofish", _cid),
-                    "conversationType": 1,
-                    "content": {
-                        "contentType": 101,
-                        "custom": { "type": custom_type, "data": encoded_data }
-                    },
-                    "redPointPolicy": 0,
-                    "extension": { "extJson": "{}" },
-                    "ctx": { "appVersion": "1.0", "platform": "web" },
-                    "mtags": {},
-                    "msgReadStatusSetting": 1,
-                },
-                { "actualReceivers": [format!("{}@goofish", target_id), format!("{}@goofish", my_id)] }
-            ]
-        });
-
+        let msg = build_send_message(target_id, message, cid, &my_id)?;
         self.conn.send(&msg).await
     }
 
@@ -449,6 +495,64 @@ mod tests {
                 "error should mention WebSocket"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn t3_61b_build_send_message_matches_reference_text_shape() -> anyhow::Result<()> {
+        let chain = MessageChain::from("hello");
+        let msg = build_send_message("buyer-1", &chain, Some("chat-1"), "seller-1")?;
+
+        assert_eq!(msg["lwp"], "/r/MessageSend/sendByReceiverScope");
+        assert_eq!(msg["body"][0]["cid"], "chat-1@goofish");
+        assert_eq!(msg["body"][1]["actualReceivers"][0], "buyer-1@goofish");
+        assert_eq!(msg["body"][1]["actualReceivers"][1], "seller-1@goofish");
+        assert_eq!(msg["body"][0]["content"]["contentType"], 101);
+        assert_eq!(msg["body"][0]["content"]["custom"]["type"], 1);
+
+        let decoded = STANDARD.decode(
+            msg["body"][0]["content"]["custom"]["data"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing custom data"))?,
+        )?;
+        let inner: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(inner["contentType"], 1);
+        assert_eq!(inner["text"]["text"], "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn t3_61c_build_send_message_matches_reference_multi_segment_shape() -> anyhow::Result<()> {
+        let chain = MessageChain::from(vec![
+            MessageSegment::text("hello"),
+            MessageSegment::Image {
+                image_url: "https://img.example/item.jpg".into(),
+                width: 320,
+                height: 240,
+            },
+        ]);
+        let msg = build_send_message("buyer-2", &chain, None, "seller-2")?;
+
+        assert_eq!(msg["body"][0]["cid"], "buyer-2@goofish");
+        assert_eq!(msg["body"][0]["content"]["custom"]["type"], 2);
+
+        let decoded = STANDARD.decode(
+            msg["body"][0]["content"]["custom"]["data"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing custom data"))?,
+        )?;
+        let inner: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(inner["contentType"], 101);
+
+        let nested = STANDARD.decode(
+            inner["custom"]["data"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing nested custom data"))?,
+        )?;
+        let segments: Value = serde_json::from_slice(&nested)?;
+        assert_eq!(segments[0]["type"], "text");
+        assert_eq!(segments[1]["type"], "image");
+        assert_eq!(segments[1]["image_url"], "https://img.example/item.jpg");
         Ok(())
     }
 
@@ -669,6 +773,57 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn t3_80b_decode_sync_payload_skips_plain_json() -> anyhow::Result<()> {
+        let raw = STANDARD.encode(serde_json::to_string(&serde_json::json!({
+            "message": "plain sync payload"
+        }))?);
+        assert!(decode_sync_payload(&raw).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80c_decode_sync_payload_accepts_msgpack_business_events() -> anyhow::Result<()> {
+        let original = serde_json::json!({
+            "1": {"2": "cid@goofish"},
+            "3": {"redReminder": "等待买家付款"}
+        });
+        let raw = STANDARD.encode(rmp_serde::to_vec(&original)?);
+        assert_eq!(decode_sync_payload(&raw), Some(original));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80d_is_chat_message_matches_reference_shape() -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "1": {
+                "10": {
+                    "reminderContent": "hello"
+                }
+            }
+        });
+        assert!(is_chat_message(&payload));
+
+        let not_chat = serde_json::json!({
+            "1": {
+                "10": {
+                    "senderUserId": "buyer"
+                }
+            }
+        });
+        assert!(!is_chat_message(&not_chat));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80e_bracket_system_message_matches_reference_shape() -> anyhow::Result<()> {
+        assert!(is_bracket_system_message("[系统消息]"));
+        assert!(is_bracket_system_message(" [已下单] "));
+        assert!(!is_bracket_system_message("你好[系统消息]"));
+        assert!(!is_bracket_system_message(""));
+        Ok(())
+    }
+
     // ---- is_typing_status tests ----
 
     #[test]
@@ -744,6 +899,107 @@ mod tests {
         // body = payload["1"], sender_field = body["10"]["reminderContent"]
         assert_eq!(payload["1"]["10"]["reminderContent"], "hello from reminder");
         assert_eq!(payload["1"]["2"], "cid@goofish");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_87b_parse_event_skips_non_chat_payload() -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let payload = serde_json::json!({
+            "1": {
+                "2": "cid@goofish",
+                "10": {
+                    "senderUserId": "buyer-1",
+                    "reminderTitle": "买家"
+                }
+            }
+        });
+
+        assert!(adapter.parse_event(&payload).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_88_parse_event_unwraps_custom_text_content() -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let inner = serde_json::json!({
+            "contentType": 1,
+            "text": {"text": "来自 custom 的文本"}
+        });
+        let payload = serde_json::json!({
+            "1": {
+                "2": "cid@goofish",
+                "6": {
+                    "contentType": 101,
+                    "custom": {
+                        "type": 1,
+                        "data": STANDARD.encode(serde_json::to_string(&inner)?)
+                    }
+                },
+                "10": {
+                    "senderUserId": "buyer-1",
+                    "reminderTitle": "买家",
+                    "reminderContent": "来自 reminder 的文本"
+                }
+            }
+        });
+
+        let event = adapter
+            .parse_event(&payload)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("expected message event"))?;
+
+        assert_eq!(event.messages.summary(), "来自 custom 的文本");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_88b_parse_event_skips_bracket_system_message() -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let payload = serde_json::json!({
+            "1": {
+                "2": "cid@goofish",
+                "10": {
+                    "senderUserId": "buyer-1",
+                    "reminderTitle": "买家",
+                    "reminderContent": "[宝贝已下架]"
+                }
+            }
+        });
+
+        assert!(adapter.parse_event(&payload).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_89_parse_event_falls_back_to_reminder_content_for_opaque_custom(
+    ) -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let inner = serde_json::json!({"opaque": true});
+        let payload = serde_json::json!({
+            "1": {
+                "2": "cid@goofish",
+                "6": {
+                    "contentType": 101,
+                    "custom": {
+                        "type": 2,
+                        "data": STANDARD.encode(serde_json::to_string(&inner)?)
+                    }
+                },
+                "10": {
+                    "senderUserId": "buyer-2",
+                    "reminderTitle": "买家",
+                    "reminderContent": "参考实现会取这段文本"
+                }
+            }
+        });
+
+        let event = adapter
+            .parse_event(&payload)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("expected message event"))?;
+
+        assert_eq!(event.messages.summary(), "参考实现会取这段文本");
         Ok(())
     }
 }

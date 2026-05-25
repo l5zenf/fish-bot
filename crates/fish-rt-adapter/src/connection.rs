@@ -60,41 +60,14 @@ impl FishConnection {
 
     /// Perform the fish-specific WS handshake: /reg + sync ackDiff.
     pub(crate) async fn handshake(&self, token: &str, device_id: &str) -> Result<()> {
-        let reg_msg = serde_json::json!({
-            "lwp": "/reg",
-            "headers": {
-                "cache-header": "app-key token ua wv",
-                "app-key": "444e9908a51d1cb236a27862abc769c9",
-                "token": token,
-                "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
-                "dt": "j",
-                "wv": "im:3,au:3,sy:6",
-                "did": device_id,
-                "mid": generate_mid(),
-            }
-        });
+        let reg_msg = build_registration_message(token, device_id);
         self.send(&reg_msg).await?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let sync_msg = serde_json::json!({
-            "lwp": "/r/SyncStatus/ackDiff",
-            "headers": { "mid": generate_mid() },
-            "body": [
-                {
-                    "pipeline": "sync",
-                    "tooLong2Tag": "PNM,1",
-                    "channel": "sync",
-                    "topic": "sync",
-                    "highPts": 0,
-                    "pts": now * 1000,
-                    "seq": 0,
-                    "timestamp": now,
-                }
-            ]
-        });
+        let sync_msg = build_sync_ack_message(now);
         self.send(&sync_msg).await?;
         Ok(())
     }
@@ -120,6 +93,42 @@ impl FishConnection {
     }
 }
 
+fn build_registration_message(token: &str, device_id: &str) -> Value {
+    serde_json::json!({
+        "lwp": "/reg",
+        "headers": {
+            "cache-header": "app-key token ua wv",
+            "app-key": "444e9908a51d1cb236a27862abc769c9",
+            "token": token,
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
+            "dt": "j",
+            "wv": "im:3,au:3,sy:6",
+            "sync": "0,0;0;0;",
+            "did": device_id,
+            "mid": generate_mid(),
+        }
+    })
+}
+
+fn build_sync_ack_message(now_ms: u64) -> Value {
+    serde_json::json!({
+        "lwp": "/r/SyncStatus/ackDiff",
+        "headers": { "mid": generate_mid() },
+        "body": [
+            {
+                "pipeline": "sync",
+                "tooLong2Tag": "PNM,1",
+                "channel": "sync",
+                "topic": "sync",
+                "highPts": 0,
+                "pts": now_ms * 1000,
+                "seq": 0,
+                "timestamp": now_ms,
+            }
+        ]
+    })
+}
+
 impl Default for FishConnection {
     fn default() -> Self {
         Self::new()
@@ -140,5 +149,23 @@ mod tests {
     async fn t_connection_default() {
         let conn = FishConnection::default();
         assert!(conn.ws_writer.read().await.is_none());
+    }
+
+    #[test]
+    fn t_connection_registration_message_matches_reference_shape() {
+        let msg = build_registration_message("token-123", "device-456");
+        assert_eq!(msg["lwp"], "/reg");
+        assert_eq!(msg["headers"]["token"], "token-123");
+        assert_eq!(msg["headers"]["did"], "device-456");
+        assert_eq!(msg["headers"]["sync"], "0,0;0;0;");
+    }
+
+    #[test]
+    fn t_connection_sync_ack_message_matches_reference_shape() {
+        let msg = build_sync_ack_message(1_700_000_000_000);
+        assert_eq!(msg["lwp"], "/r/SyncStatus/ackDiff");
+        assert_eq!(msg["body"][0]["pipeline"], "sync");
+        assert_eq!(msg["body"][0]["pts"], 1_700_000_000_000u64 * 1000);
+        assert_eq!(msg["body"][0]["timestamp"], 1_700_000_000_000u64);
     }
 }

@@ -4,6 +4,79 @@ use serde_json::Value;
 use fish_core::error::Result;
 use fish_core::message::MessageSegment;
 
+fn decode_simple_custom_segment(payload: &Value) -> Option<MessageSegment> {
+    match payload.get("type").and_then(|v| v.as_str()) {
+        Some("text") => Some(MessageSegment::Text {
+            text: payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }),
+        Some("image") => Some(MessageSegment::Image {
+            image_url: payload
+                .get("image_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            width: payload.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            height: payload.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        }),
+        Some("audio") => Some(MessageSegment::Audio {
+            audio_url: payload
+                .get("audio_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            duration_ms: payload
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        }),
+        Some("node") => Some(MessageSegment::CustomNode {
+            desc: payload
+                .get("desc")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            content: payload.get("content").cloned().unwrap_or(Value::Null),
+        }),
+        _ => None,
+    }
+}
+
+fn decode_embedded_custom_segments(payload: &Value) -> Result<Option<Vec<MessageSegment>>> {
+    if payload.get("contentType").and_then(|v| v.as_i64()) != Some(101) {
+        return Ok(None);
+    }
+
+    let data_b64 = payload["custom"]["data"].as_str().unwrap_or("");
+    let decoded = STANDARD.decode(data_b64)?;
+    let embedded: Value = serde_json::from_slice(&decoded)?;
+
+    let segments = if embedded.get("contentType").is_some() {
+        vec![decode_message(&embedded)?]
+    } else if let Some(items) = embedded.as_array() {
+        let mut segments = Vec::with_capacity(items.len());
+        for item in items {
+            if item.get("contentType").is_some() {
+                segments.push(decode_message(item)?);
+            } else if let Some(segment) = decode_simple_custom_segment(item) {
+                segments.push(segment);
+            } else {
+                return Ok(None);
+            }
+        }
+        segments
+    } else if let Some(segment) = decode_simple_custom_segment(&embedded) {
+        vec![segment]
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(segments))
+}
+
 /// Encode a MessageSegment to fish protocol JSON Value, returning (payload, content_type).
 pub(crate) fn encode_message(msg: &MessageSegment) -> Result<(Value, i64)> {
     match msg {
@@ -171,6 +244,9 @@ pub(crate) fn decode_message(payload: &Value) -> Result<MessageSegment> {
 pub(crate) fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
     // Check if this is a structured content object with contentType
     if payload.get("contentType").is_some() {
+        if let Some(segments) = decode_embedded_custom_segments(payload)? {
+            return Ok(segments);
+        }
         return Ok(vec![decode_message(payload)?]);
     }
     // Check if array
@@ -518,6 +594,58 @@ mod tests {
         ]);
         let segs = decode_content(&arr)?;
         assert_eq!(segs.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn t3_43b_decode_content_unwraps_custom_text_payload() -> anyhow::Result<()> {
+        let inner = serde_json::json!({
+            "contentType": 1,
+            "text": {"text": "hello from custom"}
+        });
+        let outer = make_ct_payload(
+            101,
+            serde_json::json!({
+                "custom": {
+                    "type": 1,
+                    "data": STANDARD.encode(serde_json::to_string(&inner)?)
+                }
+            }),
+        );
+
+        let segs = decode_content(&outer)?;
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0], MessageSegment::Text { text } if text == "hello from custom"));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_43c_decode_content_unwraps_custom_multi_segments() -> anyhow::Result<()> {
+        let inner = serde_json::json!([
+            {"type": "text", "text": "hello"},
+            {"type": "image", "image_url": "https://img.example/pic.jpg", "width": 640, "height": 480}
+        ]);
+        let outer = make_ct_payload(
+            101,
+            serde_json::json!({
+                "custom": {
+                    "type": 2,
+                    "data": STANDARD.encode(serde_json::to_string(&inner)?)
+                }
+            }),
+        );
+
+        let segs = decode_content(&outer)?;
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(&segs[0], MessageSegment::Text { text } if text == "hello"));
+        assert!(matches!(
+            &segs[1],
+            MessageSegment::Image {
+                image_url,
+                width: 640,
+                height: 480
+            } if image_url == "https://img.example/pic.jpg"
+        ));
         Ok(())
     }
 
