@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use fish_core::AdapterEventSink;
+use fish_core::BaseAdapter;
 use fish_core::error::Result;
 use fish_core::message::MessageChain;
-use fish_core::BaseAdapter;
 
 struct MockAdapter;
 

@@ -275,13 +275,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use crate::handlers::{HandlerContext, MessageHandler, RouteHint};
+    use crate::plugin::PluginMetadata;
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
     use fish_core::error::{AppError, Result};
     use fish_core::message::MessageChain;
     use fish_core::rule::is_fullmatch;
-    use crate::handlers::{HandlerContext, MessageHandler, RouteHint};
-    use crate::plugin::PluginMetadata;
 
     struct MockAdapter;
     #[async_trait]

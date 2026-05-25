@@ -592,7 +592,10 @@ impl FishAPI {
                     return self.qrcode_login_flow().await;
                 }
                 Err(e) => {
-                    tracing::warn!("hasLogin.do failed: {}, falling back to token validation", e);
+                    tracing::warn!(
+                        "hasLogin.do failed: {}, falling back to token validation",
+                        e
+                    );
                 }
             }
             match self.get_token().await {
@@ -760,7 +763,6 @@ impl Clone for FishAPI {
     }
 }
 
-
 /// Simple URL encoder for form bodies.
 fn percent_encode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -860,7 +862,10 @@ mod tests {
         assert_eq!(form.get("hsiz"), Some(&"cookie2-1".to_string()));
         assert_eq!(form.get("deviceId"), Some(&"device-1".to_string()));
         assert_eq!(form.get("defaultView"), Some(&"hasLogin".to_string()));
-        assert_eq!(form.get("bizParams"), Some(&"taobaoBizLoginFrom=web".to_string()));
+        assert_eq!(
+            form.get("bizParams"),
+            Some(&"taobaoBizLoginFrom=web".to_string())
+        );
     }
 
     #[tokio::test]

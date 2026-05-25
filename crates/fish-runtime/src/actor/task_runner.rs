@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::runtime::{QueueStrategy, RuntimeConfig};
 use crate::Result;
+use crate::runtime::{QueueStrategy, RuntimeConfig};
 use fish_core::telemetry::Telemetry;
 
 pub(super) type TaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -40,7 +40,11 @@ impl TaskScheduler {
                 let queue: Arc<tokio::sync::Mutex<VecDeque<PendingTask>>> =
                     Arc::new(tokio::sync::Mutex::new(VecDeque::with_capacity(*max_queue)));
                 let notify = Arc::new(tokio::sync::Notify::new());
-                spawn_queue_processor(Arc::clone(&queue), Arc::clone(&notify), Arc::clone(&semaphore));
+                spawn_queue_processor(
+                    Arc::clone(&queue),
+                    Arc::clone(&notify),
+                    Arc::clone(&semaphore),
+                );
                 (Some(queue), Some(notify))
             }
         };
@@ -143,26 +147,20 @@ fn spawn_queue_processor(
             };
 
             match task {
-                Some(task) => {
-                    match Arc::clone(&semaphore).acquire_owned().await {
-                        Ok(permit) => spawn_handler_task(permit, task, true),
-                        Err(err) => {
-                            tracing::warn!(error = %err, "task scheduler stopped accepting queued work");
-                            break;
-                        }
+                Some(task) => match Arc::clone(&semaphore).acquire_owned().await {
+                    Ok(permit) => spawn_handler_task(permit, task, true),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "task scheduler stopped accepting queued work");
+                        break;
                     }
-                }
+                },
                 None => notify.notified().await,
             }
         }
     });
 }
 
-fn spawn_handler_task(
-    permit: tokio::sync::OwnedSemaphorePermit,
-    task: PendingTask,
-    queued: bool,
-) {
+fn spawn_handler_task(permit: tokio::sync::OwnedSemaphorePermit, task: PendingTask, queued: bool) {
     tokio::spawn(async move {
         let _permit = permit;
         let started = std::time::Instant::now();

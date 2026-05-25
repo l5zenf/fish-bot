@@ -167,11 +167,7 @@ where
         self
     }
 
-    pub fn on_message<M, F>(
-        self,
-        pattern: impl Into<String>,
-        mapper: F,
-    ) -> Self
+    pub fn on_message<M, F>(self, pattern: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -180,11 +176,7 @@ where
         self.register_message_handler::<M, F>(MessageRouteSpec::Exact(pattern.into()), mapper)
     }
 
-    pub fn on_prefix<M, F>(
-        self,
-        prefix: impl Into<String>,
-        mapper: F,
-    ) -> Self
+    pub fn on_prefix<M, F>(self, prefix: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -193,11 +185,7 @@ where
         self.register_message_handler::<M, F>(MessageRouteSpec::Prefix(prefix.into()), mapper)
     }
 
-    pub fn on_keyword<M, F>(
-        self,
-        keyword: impl Into<String>,
-        mapper: F,
-    ) -> Self
+    pub fn on_keyword<M, F>(self, keyword: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -206,11 +194,7 @@ where
         self.register_message_handler::<M, F>(MessageRouteSpec::Keyword(keyword.into()), mapper)
     }
 
-    pub fn on_regex<M, F>(
-        self,
-        pattern: impl Into<String>,
-        mapper: F,
-    ) -> Self
+    pub fn on_regex<M, F>(self, pattern: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -228,11 +212,7 @@ where
         self.register_message_handler::<M, F>(MessageRouteSpec::Fallback, mapper)
     }
 
-    pub fn on_event<M, F>(
-        mut self,
-        event_type: impl Into<String>,
-        mapper: F,
-    ) -> Self
+    pub fn on_event<M, F>(mut self, event_type: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -250,11 +230,7 @@ where
         self
     }
 
-    fn register_message_handler<M, F>(
-        mut self,
-        route: MessageRouteSpec,
-        mapper: F,
-    ) -> Self
+    fn register_message_handler<M, F>(mut self, route: MessageRouteSpec, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
@@ -617,8 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn actor_plugin_routes_event_into_actor() -> anyhow::Result<()> {
-        let plugin =
-            ActorPluginBuilder::new(|| CountActor { seen: 0 }).on_event("order_create", OrderCreated);
+        let plugin = ActorPluginBuilder::new(|| CountActor { seen: 0 })
+            .on_event("order_create", OrderCreated);
 
         let app_ctx = Arc::new(fish_core::ctx::Ctx::new());
         app_ctx.insert(ActorBusHandle::runtime_default());

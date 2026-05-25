@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
+use super::plugin::EchoPlugin;
 use fish_rt_adapter::prelude::*;
 use fish_rt_adapter::{BaseAdapter, FishWebSocketAdapter, RuntimeHost, Telemetry};
-
-use super::plugin::EchoPlugin;
 
 pub async fn run() -> Result<()> {
     init_tracing();
 
-    let bootstrap = FishAppBootstrap::new();
+    let bootstrap = QuickstartSimpleBootstrap::new();
     bootstrap.run().await
 }
 
@@ -20,11 +19,11 @@ fn init_tracing() {
         .try_init();
 }
 
-struct FishAppBootstrap {
+struct QuickstartSimpleBootstrap {
     adapter: Arc<dyn BaseAdapter>,
 }
 
-impl FishAppBootstrap {
+impl QuickstartSimpleBootstrap {
     fn new() -> Self {
         Self {
             adapter: Arc::new(FishWebSocketAdapter::new()),

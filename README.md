@@ -24,8 +24,8 @@ crates/
   fish-plugin-macros  #[plugin] / #[message] / #[event]
 
 examples/
-  quickstart          离线最小可运行示例
-  fish-app            真实闲鱼宿主骨架
+  quickstart-simple   基于宏的 FishWebSocketAdapter 插件示例
+  quickstart-custom   基于 actor 的 FishWebSocketAdapter 插件示例
 ```
 
 依赖方向保持单向：
@@ -78,30 +78,30 @@ BaseAdapter
 
 仓库里有两个 example 项目：
 
-- `examples/quickstart`
-  - 离线运行
-  - 用本地 `LocalAdapter` 模拟事件下推
-  - 用来理解最小接线方式
-- `examples/fish-app`
-  - 使用 `fish-rt-adapter` 提供的 `FishWebSocketAdapter`
-  - 作为真实闲鱼宿主骨架
+- `examples/quickstart-simple`
+  - 默认使用 `FishWebSocketAdapter`
+  - 演示 `#[plugin]` / `#[message]` 的宏插件开发方式
+- `examples/quickstart-custom`
+  - 默认使用 `FishWebSocketAdapter`
+  - 演示 `ActorPluginBuilder` 的 actor-first 插件开发方式
 
-先跑离线例子：
-
-```bash
-cargo run -p fish-example-quickstart
-```
-
-再跑真实闲鱼宿主：
+先跑宏插件例子：
 
 ```bash
-cargo run -p fish-example-fish-app
+cargo run -p fish-example-quickstart-simple
 ```
 
-运行 `fish-app` 前，建议准备本地认证信息：
+再跑 actor-first 例子：
 
-- `FISH_AUTH_JSON`
-- 或 `FISH_DATA_DIR/fish_auth.json`
+```bash
+cargo run -p fish-example-quickstart-custom
+```
+
+如果你已经从浏览器拿到了原始 `Cookie` 请求头，也可以直接导入并写入 `data/fish_auth.json`：
+
+```bash
+cargo run -p fish-example-quickstart-simple -- --cookies "cookie2=...; unb=...; _m_h5_tk=..."
+```
 
 ## 宿主如何启动 runtime
 
@@ -435,33 +435,31 @@ let pool = ctx.app_ctx().get::<MyDatabasePool>();
 
 ## 示例项目
 
-### `examples/quickstart`
+### `examples/quickstart-simple`
 
 用途：
 
 - 理解最小宿主接线
 - 看 `BaseAdapter -> RuntimeHost -> Plugin` 的完整流转
-- 离线验证插件行为
+- 演示默认 `FishWebSocketAdapter` 下的宏插件接线
 
 入口文件：
 
-- [examples/quickstart/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/bootstrap.rs)
-- [examples/quickstart/src/app/local_adapter.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/local_adapter.rs)
-- [examples/quickstart/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/plugin.rs)
+- [examples/quickstart-simple/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/bootstrap.rs)
+- [examples/quickstart-simple/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/plugin.rs)
 
-### `examples/fish-app`
+### `examples/quickstart-custom`
 
 用途：
 
-- 作为真实闲鱼宿主骨架
-- 演示如何直接使用 `FishWebSocketAdapter`
-- 演示 runtime 内核与闲鱼适配实现分离后的标准接线方式
-- 给后续业务系统一个干净的接入起点
+- 演示 `ActorPluginBuilder` 的 actor-first 用法
+- 展示 `MessageContext` 如何被路由到 typed actor message
+- 演示默认 `FishWebSocketAdapter` 下的 actor 插件接线
 
 入口文件：
 
-- [examples/fish-app/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/fish-app/src/app/bootstrap.rs)
-- [examples/fish-app/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/fish-app/src/app/plugin.rs)
+- [examples/quickstart-custom/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/bootstrap.rs)
+- [examples/quickstart-custom/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/plugin.rs)
 
 ## 项目原则
 

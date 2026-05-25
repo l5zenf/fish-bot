@@ -1,5 +1,5 @@
 [package]
-name = "fish-example-fish-app"
+name = "fish-example-quickstart-simple"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -7,6 +7,6 @@ publish = false
 [dependencies]
 fish-rt-adapter = { workspace = true }
 tokio = { workspace = true }
-kameo = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+clap = { workspace = true }

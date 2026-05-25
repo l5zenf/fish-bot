@@ -1,7 +1,37 @@
+use fish_core::error::{AppError, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieImportReport {
+    pub imported: usize,
+    pub path: PathBuf,
+}
+
+pub fn parse_browser_cookie_header(raw: &str) -> HashMap<String, String> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let (name, value) = trimmed.split_once('=')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+
+            Some((name.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+pub async fn import_browser_cookies(raw: &str) -> Result<CookieImportReport> {
+    AuthManager::new().import_browser_cookies(raw).await
+}
 
 /// Manages fish authentication: token acquisition, refresh, and cookie persistence.
 pub(crate) struct AuthManager {
@@ -122,6 +152,29 @@ impl AuthManager {
 
     pub(crate) async fn get_cookies(&self) -> HashMap<String, String> {
         self.cookies.lock().await.clone()
+    }
+
+    pub(crate) async fn import_browser_cookies(&self, raw: &str) -> Result<CookieImportReport> {
+        let parsed = parse_browser_cookie_header(raw);
+        if parsed.is_empty() {
+            return Err(AppError::auth(
+                "browser cookie string is empty or does not contain valid key=value pairs",
+            ));
+        }
+
+        let imported = parsed.len();
+        let mut cookies = self.cookies.lock().await;
+        for (key, value) in parsed {
+            cookies.insert(key, value);
+        }
+        drop(cookies);
+
+        self.save_cookies_to_file().await;
+
+        Ok(CookieImportReport {
+            imported,
+            path: self.auth_file_path(),
+        })
     }
 
     /// Build a cookie header string from current cookies.
@@ -480,5 +533,59 @@ mod tests {
             "should return None when env var is not set"
         );
         Ok(())
+    }
+
+    #[test]
+    fn t3_64_parse_browser_cookie_header() {
+        let cookies = parse_browser_cookie_header(
+            "cookie2=abc; _m_h5_tk=token_123; sgcookie=E100%2Btest; invalid-entry ; tracknick=nick=name",
+        );
+
+        assert_eq!(cookies.get("cookie2"), Some(&"abc".to_string()));
+        assert_eq!(cookies.get("_m_h5_tk"), Some(&"token_123".to_string()));
+        assert_eq!(cookies.get("sgcookie"), Some(&"E100%2Btest".to_string()));
+        assert_eq!(cookies.get("tracknick"), Some(&"nick=name".to_string()));
+        assert!(!cookies.contains_key("invalid-entry"));
+    }
+
+    #[tokio::test]
+    async fn t3_65_import_browser_cookies_persists_file() -> anyhow::Result<()> {
+        let dir = temp_auth_dir()?;
+        let auth = AuthManager {
+            client: reqwest::Client::new(),
+            cookies: Arc::new(Mutex::new([("unb".into(), "old-user".into())].into())),
+            data_dir: dir.clone(),
+        };
+
+        let report = auth
+            .import_browser_cookies("cookie2=new-cookie; unb=new-user; tracknick=tester")
+            .await?;
+
+        assert_eq!(report.imported, 3);
+        assert_eq!(report.path, dir.join("fish_auth.json"));
+
+        let saved = std::fs::read_to_string(dir.join("fish_auth.json"))?;
+        let parsed: HashMap<String, String> = serde_json::from_str(&saved)?;
+        assert_eq!(parsed.get("cookie2"), Some(&"new-cookie".to_string()));
+        assert_eq!(parsed.get("unb"), Some(&"new-user".to_string()));
+        assert_eq!(parsed.get("tracknick"), Some(&"tester".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_66_import_browser_cookies_rejects_empty_input() {
+        let dir = temp_auth_dir().expect("temp dir");
+        let auth = AuthManager {
+            client: reqwest::Client::new(),
+            cookies: Arc::new(Mutex::new(HashMap::new())),
+            data_dir: dir,
+        };
+
+        let err = auth
+            .import_browser_cookies("   ; invalid-entry  ")
+            .await
+            .expect_err("invalid cookie string should fail");
+
+        assert!(matches!(err, AppError::Auth { .. }));
     }
 }

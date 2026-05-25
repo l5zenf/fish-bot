@@ -972,8 +972,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_89_parse_event_falls_back_to_reminder_content_for_opaque_custom(
-    ) -> anyhow::Result<()> {
+    async fn t3_89_parse_event_falls_back_to_reminder_content_for_opaque_custom()
+    -> anyhow::Result<()> {
         let adapter = Arc::new(FishWebSocketAdapter::new());
         let inner = serde_json::json!({"opaque": true});
         let payload = serde_json::json!({

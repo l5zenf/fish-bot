@@ -11,9 +11,9 @@ impl EchoPlugin {
         Ok(())
     }
 
-    #[message(keyword = "你好")]
-    async fn greet(&self, ctx: MessageContext) -> Result<()> {
-        ctx.reply(format!("收到: {}", ctx.text())).await?;
+    #[message(keyword = "fish")]
+    async fn on_keyword(&self, ctx: MessageContext) -> Result<()> {
+        ctx.reply(format!("keyword hit: {}", ctx.text())).await?;
         Ok(())
     }
 }
