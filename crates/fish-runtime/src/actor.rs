@@ -1,50 +1,33 @@
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use kameo::message::{Context, Message};
 use kameo::prelude::*;
-use tokio::sync::Semaphore;
 
 use crate::handlers::{
     EventHandlerContext, EventHandlerFunc, HandlerContext, MessageHandler, RouteHint,
 };
 use crate::runtime::{QueueStrategy, RuntimeConfig};
-use crate::{BaseAdapter, Plugin, Result};
+use crate::{BaseAdapter, Plugin};
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
 
+mod task_runner;
+
+use self::task_runner::{TaskFuture, TaskScheduler};
+
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
-/// Concurrency is bounded by a semaphore to prevent unbounded task growth.
+/// Concurrency and queueing are delegated to an internal scheduler.
 #[derive(Actor)]
 pub struct PluginActor {
     plugin: Arc<dyn Plugin>,
     /// Handler id → index into plugin.message_handlers() for O(1) lookup.
     handler_index: std::collections::HashMap<String, usize>,
-    semaphore: Arc<Semaphore>,
-    strategy: QueueStrategy,
-    /// Shared queue for DropOldest strategy.
-    pending_queue: Option<Arc<tokio::sync::Mutex<VecDeque<PendingTask>>>>,
-    /// Notifier to wake the queue processor.
-    queue_notify: Option<Arc<tokio::sync::Notify>>,
+    scheduler: TaskScheduler,
     /// Optional mutable plugin state (for stateful plugins).
     pub(crate) plugin_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    default_timeout: Duration,
-}
-
-/// A task queued for later processing when the plugin is at capacity.
-type TaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
-
-pub(super) struct PendingTask {
-    pub(super) handler_id: String,
-    pub(super) handler_timeout: std::time::Duration,
-    pub(super) plugin_id: String,
-    pub(super) future: TaskFuture,
-    pub(super) telemetry: Arc<Telemetry>,
 }
 
 impl PluginActor {
@@ -55,6 +38,7 @@ impl PluginActor {
     }
 
     /// Create a PluginActor with an explicit queue strategy (other config from plugin default).
+    #[allow(dead_code)]
     pub fn with_strategy(plugin: Arc<dyn Plugin>, strategy: QueueStrategy) -> Self {
         let mut config = plugin.runtime_config();
         config.queue_strategy = strategy;
@@ -70,94 +54,13 @@ impl PluginActor {
             .map(|(i, h)| (h.id.clone(), i))
             .collect();
 
-        let semaphore = Arc::new(Semaphore::new(config.concurrency));
         let plugin_state = plugin.initial_state();
-
-        let (pending_queue, queue_notify) = match &config.queue_strategy {
-            QueueStrategy::DropNewest => (None, None),
-            QueueStrategy::DropOldest(max_queue) => {
-                let queue: Arc<tokio::sync::Mutex<VecDeque<PendingTask>>> =
-                    Arc::new(tokio::sync::Mutex::new(VecDeque::with_capacity(*max_queue)));
-                let notify = Arc::new(tokio::sync::Notify::new());
-
-                // Background processor: drain the queue as permits become available.
-                let processor_queue = Arc::clone(&queue);
-                let processor_notify = Arc::clone(&notify);
-                let processor_semaphore = Arc::clone(&semaphore);
-
-                tokio::spawn(async move {
-                    loop {
-                        let task = {
-                            let mut q = processor_queue.lock().await;
-                            q.pop_front()
-                        };
-                        match task {
-                            Some(task) => {
-                                let permit = Arc::clone(&processor_semaphore).acquire_owned().await;
-                                tokio::spawn(async move {
-                                    let _permit = permit;
-                                    let started = std::time::Instant::now();
-                                    let result =
-                                        tokio::time::timeout(task.handler_timeout, task.future)
-                                            .await;
-                                    match result {
-                                        Ok(Ok(())) => {
-                                            task.telemetry
-                                                .queued_handler_succeeded
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            tracing::debug!(
-                                                plugin = %task.plugin_id,
-                                                handler = %task.handler_id,
-                                                cost_ms = started.elapsed().as_millis(),
-                                                "queued handler finished"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            task.telemetry
-                                                .queued_handler_failed
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            tracing::error!(
-                                                plugin = %task.plugin_id,
-                                                handler = %task.handler_id,
-                                                error = %e,
-                                                cost_ms = started.elapsed().as_millis(),
-                                                "queued handler failed"
-                                            );
-                                        }
-                                        Err(_) => {
-                                            task.telemetry
-                                                .queued_handler_timed_out
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            tracing::warn!(
-                                                plugin = %task.plugin_id,
-                                                handler = %task.handler_id,
-                                                timeout_ms = task.handler_timeout.as_millis(),
-                                                "queued handler timeout"
-                                            );
-                                        }
-                                    }
-                                });
-                            }
-                            None => {
-                                processor_notify.notified().await;
-                            }
-                        }
-                    }
-                });
-
-                (Some(queue), Some(notify))
-            }
-        };
 
         Self {
             plugin,
             handler_index,
-            semaphore,
-            strategy: config.queue_strategy,
-            pending_queue,
-            queue_notify,
+            scheduler: TaskScheduler::new(&config),
             plugin_state,
-            default_timeout: config.timeout,
         }
     }
 
@@ -179,105 +82,9 @@ impl PluginActor {
         future: TaskFuture,
         telemetry: Arc<Telemetry>,
     ) {
-        telemetry
-            .handler_started
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                match self.strategy {
-                    QueueStrategy::DropNewest => {
-                        telemetry
-                            .drop_newest_drops
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            plugin = %plugin_id,
-                            handler = %handler_id,
-                            "plugin busy, dropping event"
-                        );
-                        return;
-                    }
-                    QueueStrategy::DropOldest(max_queue) => {
-                        telemetry
-                            .drop_oldest_enqueues
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            plugin = %plugin_id,
-                            handler = %handler_id,
-                            "plugin busy, enqueuing event"
-                        );
-                        if let (Some(queue), Some(notify)) =
-                            (&self.pending_queue, &self.queue_notify)
-                        {
-                            let task = PendingTask {
-                                handler_id: handler_id.to_string(),
-                                handler_timeout,
-                                plugin_id: plugin_id.to_string(),
-                                future,
-                                telemetry: Arc::clone(&telemetry),
-                            };
-                            let mut q = queue.lock().await;
-                            if q.len() >= max_queue {
-                                telemetry
-                                    .drop_oldest_oldest_discards
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                q.pop_front(); // drop oldest
-                            }
-                            q.push_back(task);
-                            notify.notify_one();
-                        }
-                        return;
-                    }
-                }
-            }
-        };
-
-        // Got a permit — spawn directly
-        let handler_id = handler_id.to_string();
-        let plugin_id = plugin_id.to_string();
-
-        tokio::spawn(async move {
-            let _permit = permit;
-            let started = std::time::Instant::now();
-            let result = tokio::time::timeout(handler_timeout, future).await;
-            match result {
-                Ok(Ok(())) => {
-                    telemetry
-                        .handler_succeeded
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!(
-                        plugin = %plugin_id,
-                        handler = %handler_id,
-                        cost_ms = started.elapsed().as_millis(),
-                        "handler finished"
-                    );
-                }
-                Ok(Err(e)) => {
-                    telemetry
-                        .handler_failed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::error!(
-                        plugin = %plugin_id,
-                        handler = %handler_id,
-                        error = %e,
-                        cost_ms = started.elapsed().as_millis(),
-                        "handler failed"
-                    );
-                }
-                Err(_) => {
-                    telemetry
-                        .handler_timed_out
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        plugin = %plugin_id,
-                        handler = %handler_id,
-                        timeout_ms = handler_timeout.as_millis(),
-                        "handler timeout"
-                    );
-                }
-            }
-        });
+        self.scheduler
+            .dispatch_task_or_enqueue(handler_id, handler_timeout, plugin_id, future, telemetry)
+            .await;
     }
 
     /// Try to acquire a permit or enqueue the task per the queue strategy.
@@ -310,7 +117,7 @@ impl PluginActor {
     ) {
         self.dispatch_task_or_enqueue(
             handler_id,
-            self.default_timeout,
+            self.scheduler.default_timeout(),
             plugin_id,
             future,
             telemetry,
@@ -513,6 +320,13 @@ pub(crate) mod tests {
         let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
         let actor = PluginActor::new(plugin);
         let _ref = PluginActor::spawn(actor);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t2_5b_with_strategy_overrides_runtime_config() {
+        let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
+        let actor = PluginActor::with_strategy(plugin, QueueStrategy::DropOldest(8));
+        assert_eq!(actor.plugin().metadata().id, "test");
     }
 
     #[tokio::test(flavor = "multi_thread")]

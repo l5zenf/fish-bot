@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 fish-core = { workspace = true }
 fish-runtime = { workspace = true }
+fish-rt-adapter = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -16,6 +17,7 @@ members = [
     "crates/fish-core",
     "crates/fish-runtime",
     "crates/fish-plugin-macros",
+    "crates/fish-rt-adapter",
     "examples/quickstart",
     "examples/fish-app",
 ]
@@ -58,3 +60,4 @@ rmp-serde = "1.3"
 fish-core = { path = "crates/fish-core" }
 fish-runtime = { path = "crates/fish-runtime" }
 fish-plugin-macros = { path = "crates/fish-plugin-macros" }
+fish-rt-adapter = { path = "crates/fish-rt-adapter" }

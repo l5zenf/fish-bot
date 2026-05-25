@@ -7,7 +7,8 @@
 现在的设计目标很明确：
 
 - `fish-core` 定义稳定抽象和通用模型
-- `fish-runtime` 提供运行时编排能力，并内置默认的闲鱼适配实现
+- `fish-runtime` 提供运行时编排能力
+- `fish-rt-adapter` 提供默认的闲鱼 runtime 适配实现
 - `fish-plugin-macros` 提供插件声明宏
 - 宿主只是组装 `adapter + plugins + context`，不和运行时内部实现耦合
 
@@ -18,7 +19,8 @@
 ```text
 crates/
   fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
-  fish-runtime        运行时编排：RuntimeHost / PluginActor / ActorPluginBuilder / 默认 Fish 适配器
+  fish-runtime        运行时编排：RuntimeHost / PluginActor / ActorPluginBuilder
+  fish-rt-adapter     默认闲鱼适配实现：FishWebSocketAdapter
   fish-plugin-macros  #[plugin] / #[message] / #[event]
 
 examples/
@@ -30,6 +32,7 @@ examples/
 
 ```text
 fish-runtime -> fish-core
+fish-rt-adapter -> fish-core
 fish-plugin-macros -> fish-runtime
 ```
 
@@ -80,7 +83,7 @@ BaseAdapter
   - 用本地 `LocalAdapter` 模拟事件下推
   - 用来理解最小接线方式
 - `examples/fish-app`
-  - 使用 `fish-runtime` 内置的 `FishWebSocketAdapter`
+  - 使用 `fish-rt-adapter` 提供的 `FishWebSocketAdapter`
   - 作为真实闲鱼宿主骨架
 
 先跑离线例子：
@@ -107,8 +110,9 @@ cargo run -p fish-example-fish-app
 ```rust
 use std::sync::Arc;
 
+use fish_rt_adapter::FishWebSocketAdapter;
 use fish_runtime::prelude::*;
-use fish_runtime::{plugin, FishWebSocketAdapter, RuntimeHost};
+use fish_runtime::{plugin, RuntimeHost};
 
 struct EchoPlugin;
 
@@ -151,7 +155,9 @@ RuntimeHost::new(adapter, plugins, ctx, telemetry).run().await?;
 
 ## 如果不用默认闲鱼实现
 
-`fish-runtime` 内置了默认的闲鱼 adapter，但 runtime 本身并不绑定闲鱼。
+默认闲鱼 adapter 现在位于 `fish-rt-adapter`，但 runtime 本身并不绑定闲鱼。
+
+如果你还在旧代码里从 `fish-runtime` 直接拿 `FishWebSocketAdapter`，当前版本仍然保留了兼容 re-export；但新的推荐用法是直接依赖 `fish-rt-adapter`。
 
 你只要实现 `fish-core::BaseAdapter`，就能把 runtime 接到任何外部系统上：
 
@@ -449,6 +455,7 @@ let pool = ctx.app_ctx().get::<MyDatabasePool>();
 
 - 作为真实闲鱼宿主骨架
 - 演示如何直接使用 `FishWebSocketAdapter`
+- 演示 runtime 内核与闲鱼适配实现分离后的标准接线方式
 - 给后续业务系统一个干净的接入起点
 
 入口文件：

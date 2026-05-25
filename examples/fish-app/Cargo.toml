@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 fish-runtime = { workspace = true }
+fish-rt-adapter = { workspace = true }
 tokio = { workspace = true }
 kameo = { workspace = true }
 tracing = { workspace = true }

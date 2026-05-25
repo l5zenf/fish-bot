@@ -18,9 +18,10 @@ impl Default for AuthManager {
     }
 }
 
+#[allow(dead_code)]
 impl AuthManager {
     pub fn new() -> Self {
-        let device_id = crate::fish::sign::generate_device_id("");
+        let device_id = crate::sign::generate_device_id("");
 
         // Try loading from file first, then env var
         let data_dir = Self::resolve_data_dir();
@@ -159,7 +160,7 @@ impl AuthManager {
 
     #[cfg(test)]
     pub(crate) fn test_new(data_dir: PathBuf) -> Self {
-        let device_id = crate::fish::sign::generate_device_id("");
+        let device_id = crate::sign::generate_device_id("");
         let cookies = Self::load_cookies_from_file(&data_dir).unwrap_or_default();
         Self {
             client: reqwest::Client::new(),

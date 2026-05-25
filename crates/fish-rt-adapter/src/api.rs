@@ -3,8 +3,8 @@ use fish_core::error::{AppError, Result};
 fn http_err(e: reqwest::Error) -> AppError {
     AppError::http(e.to_string())
 }
-use crate::fish::auth::AuthManager;
-use crate::fish::sign::{generate_device_id, generate_sign};
+use crate::auth::AuthManager;
+use crate::sign::{generate_device_id, generate_sign};
 use reqwest::header::HeaderValue;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -21,6 +21,7 @@ pub struct FishAPI {
     pub poll_params: Mutex<Option<HashMap<String, String>>>,
 }
 
+#[allow(dead_code)]
 impl FishAPI {
     pub fn new(auth: AuthManager) -> Self {
         let device_id = generate_device_id("");

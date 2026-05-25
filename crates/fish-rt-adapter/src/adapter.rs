@@ -19,7 +19,7 @@ use super::auth::AuthManager;
 use super::connection::FishConnection;
 use super::protocol::{decode_content, encode_chain};
 use super::sign::{decrypt, generate_mid, generate_uuid};
-use fish_runtime::BaseAdapter;
+use fish_core::BaseAdapter;
 
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
 

@@ -7,24 +7,14 @@ description = "Plugin runtime for fish"
 [dependencies]
 fish-core = { workspace = true }
 fish-plugin-macros = { workspace = true }
+fish-rt-adapter = { workspace = true }
 kameo = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-tokio-tungstenite = { workspace = true }
-tungstenite = { workspace = true }
-reqwest = { workspace = true }
-futures = { workspace = true }
-urlencoding = { workspace = true }
-qrcode = { workspace = true }
-rand = { workspace = true }
-uuid = { workspace = true }
-base64 = { workspace = true }
 serde = { workspace = true }
-md5 = { workspace = true }
-rmp-serde = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

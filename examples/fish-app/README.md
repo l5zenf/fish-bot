@@ -1,6 +1,6 @@
 # Fish App Example
 
-真实宿主骨架，直接使用 `fish-runtime` 内置的 `FishWebSocketAdapter`。
+真实宿主骨架，直接使用 `fish-rt-adapter` 提供的 `FishWebSocketAdapter`。
 
 用途：
 

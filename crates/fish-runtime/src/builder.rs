@@ -411,18 +411,13 @@ where
         let runtime = Arc::clone(&runtime);
         Box::pin(async move {
             let app_ctx = Arc::clone(&cx.app_ctx);
-            let bus = app_ctx
-                .get::<ActorBusHandle>()
-                .map(|handle| (*handle).clone())
-                .ok_or_else(|| AppError::internal("actor bus is unavailable"))?;
-            runtime.ensure_registered(bus.clone()).await;
             let message = mapper(MessageContext::new(
                 cx.event,
                 cx.adapter,
-                app_ctx,
+                Arc::clone(&app_ctx),
                 cx.telemetry,
             ));
-            bus.publish(topic, message).await
+            publish_actor_message(topic, runtime, app_ctx, message).await
         })
     })
 }
@@ -443,20 +438,33 @@ where
         let runtime = Arc::clone(&runtime);
         Box::pin(async move {
             let app_ctx = Arc::clone(&cx.app_ctx);
-            let bus = app_ctx
-                .get::<ActorBusHandle>()
-                .map(|handle| (*handle).clone())
-                .ok_or_else(|| AppError::internal("actor bus is unavailable"))?;
-            runtime.ensure_registered(bus.clone()).await;
             let message = mapper(EventContext::new(
                 cx.event,
                 cx.adapter,
-                app_ctx,
+                Arc::clone(&app_ctx),
                 cx.telemetry,
             ));
-            bus.publish(topic, message).await
+            publish_actor_message(topic, runtime, app_ctx, message).await
         })
     })
+}
+
+async fn publish_actor_message<A, M>(
+    topic: String,
+    runtime: Arc<ActorRuntime<A>>,
+    app_ctx: Arc<fish_core::ctx::Ctx>,
+    message: M,
+) -> crate::Result<()>
+where
+    A: Actor<Args = A> + Spawn + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
+    let bus = app_ctx
+        .get::<ActorBusHandle>()
+        .map(|handle| (*handle).clone())
+        .ok_or_else(|| AppError::internal("actor bus is unavailable"))?;
+    runtime.ensure_registered(bus.clone()).await;
+    bus.publish(topic, message).await
 }
 
 fn install_message_bridge<A, M>(runtime: &Arc<ActorRuntime<A>>, topic: String)
