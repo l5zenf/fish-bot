@@ -2,19 +2,17 @@
 extern crate self as fish_runtime;
 
 pub mod actor;
-pub mod bot;
 pub mod builder;
 pub mod bus;
 pub mod context;
 pub mod fish;
 pub mod handlers;
 pub mod host;
-pub mod messages;
 pub mod plugin;
 pub mod prelude;
 pub mod runtime;
 
-pub use builder::{ActorMailbox, ActorPlugin, ActorPluginBuilder};
+pub use builder::ActorPluginBuilder;
 pub use bus::{ActorBus, ActorBusHandle, RuntimeActorBus};
 pub use context::{EventContext, MessageContext};
 pub use fish::FishWebSocketAdapter;

@@ -18,7 +18,7 @@
 ```text
 crates/
   fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
-  fish-runtime        运行时编排：RuntimeHost / Bot / PluginActor / ActorPluginBuilder / 默认 Fish 适配器
+  fish-runtime        运行时编排：RuntimeHost / PluginActor / ActorPluginBuilder / 默认 Fish 适配器
   fish-plugin-macros  #[plugin] / #[message] / #[event]
 
 examples/
@@ -40,9 +40,8 @@ fish-plugin-macros -> fish-runtime
 ```text
 BaseAdapter
   -> RuntimeHost
-     -> Bot
-        -> PluginActor
-           -> handler
+     -> PluginActor
+        -> handler
 ```
 
 职责划分：
@@ -53,10 +52,8 @@ BaseAdapter
   - 提供发送消息能力
 - `RuntimeHost`
   - 负责把 adapter、plugins、共享上下文组装起来
+  - 负责基于 `RouteHint` 做消息预路由
   - 作为标准启动入口
-- `Bot`
-  - 根据 `RouteHint` 做路由预过滤
-  - 把事件分发到对应插件 actor
 - `PluginActor`
   - 为单个插件隔离状态、并发和超时控制
   - 执行真正的 handler
@@ -285,7 +282,7 @@ async fn write(&mut self, ctx: MessageContext) -> Result<()> { ... }
 - 正则匹配：`#[message(pattern = r"^\\d+$", kind = "regex")]`
 - 兜底：`#[message(fallback)]`
 
-`RuntimeHost` 启动后，`Bot` 会根据 `RouteHint` 建索引，尽量把事件只派发给可能命中的插件。
+`RuntimeHost` 启动后，会根据 `RouteHint` 建索引，尽量把事件只派发给可能命中的插件。
 
 ## Context API
 
@@ -332,7 +329,7 @@ impl Counter {
 
 ### 方式二：用 `ActorPluginBuilder` 走 actor-first 范式
 
-适合你希望插件就是 actor、本身有 mailbox、有 typed message、有 `ask` / `tell` 心智的场景：
+适合你希望插件就是 actor、本身有 typed message、有 `ask` / `tell` 心智的场景：
 
 ```rust
 use fish_runtime::prelude::*;
@@ -369,8 +366,8 @@ impl Message<CurrentValue> for CounterActor {
 }
 
 let plugin = ActorPluginBuilder::new("counter", "Counter", || CounterActor { value: 0 })
-    .on_message("incr", "/incr", Incr)
-    .build();
+    .bounded_mailbox(128)
+    .on_message("incr", "/incr", Incr);
 ```
 
 这条路的重点不是“再包一层 handler 闭包”，而是：
@@ -378,6 +375,8 @@ let plugin = ActorPluginBuilder::new("counter", "Counter", || CounterActor { val
 - 你定义的是 actor 本身
 - 路由只负责把 `MessageContext` / `EventContext` 映射成 typed message
 - 插件内部状态在 actor 里，不在 `RwLock<T>` 里
+- builder 本身就是最终插件定义，`.build()` 只是可选收口
+- mailbox 只是 builder 上的一个配置点，不再额外引入公开类型
 - 需要时可以直接拿 `actor_ref()` 做 `ask` / `tell`
 
 ## ActorPluginBuilder

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use kameo::Actor;
@@ -16,12 +16,12 @@ use crate::runtime::{QueueStrategy, RuntimeConfig};
 use crate::{ActorBusHandle, AppError, EventContext, MessageContext, Plugin};
 
 #[derive(Clone, Debug)]
-pub enum ActorMailbox {
+enum MailboxConfig {
     Bounded(usize),
     Unbounded,
 }
 
-impl Default for ActorMailbox {
+impl Default for MailboxConfig {
     fn default() -> Self {
         Self::Bounded(64)
     }
@@ -32,7 +32,7 @@ struct ActorRuntime<A: Actor> {
     bridge_ready: OnceCell<()>,
     bridge_installers: RwLock<Vec<BridgeInstaller<A>>>,
     actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
-    mailbox: ActorMailbox,
+    mailbox: MailboxConfig,
 }
 
 type BridgeInstaller<A> = Arc<dyn Fn(&Arc<ActorRuntime<A>>, ActorBusHandle) + Send + Sync>;
@@ -41,7 +41,7 @@ impl<A> ActorRuntime<A>
 where
     A: Actor<Args = A> + Spawn + Send + Sync + 'static,
 {
-    fn new(actor_factory: Arc<dyn Fn() -> A + Send + Sync>, mailbox: ActorMailbox) -> Self {
+    fn new(actor_factory: Arc<dyn Fn() -> A + Send + Sync>, mailbox: MailboxConfig) -> Self {
         Self {
             actor_ref: OnceCell::new(),
             bridge_ready: OnceCell::new(),
@@ -56,10 +56,10 @@ where
             .get_or_init(|| async {
                 let actor = (self.actor_factory)();
                 match self.mailbox.clone() {
-                    ActorMailbox::Bounded(capacity) => {
+                    MailboxConfig::Bounded(capacity) => {
                         A::spawn_with_mailbox(actor, mailbox::bounded(capacity))
                     }
-                    ActorMailbox::Unbounded => A::spawn_with_mailbox(actor, mailbox::unbounded()),
+                    MailboxConfig::Unbounded => A::spawn_with_mailbox(actor, mailbox::unbounded()),
                 }
             })
             .await
@@ -85,13 +85,21 @@ where
 pub struct ActorPluginBuilder<A: Actor> {
     metadata: PluginMetadata,
     runtime: RuntimeConfig,
-    mailbox: ActorMailbox,
+    mailbox: MailboxConfig,
     actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
-    actor_runtime: Arc<ActorRuntime<A>>,
-    message_handlers: Vec<MessageHandler>,
-    event_handlers: Vec<EventHandler>,
+    message_bindings: Vec<MessageBinding<A>>,
+    event_bindings: Vec<EventBinding<A>>,
+    runtime_state: OnceLock<Arc<ActorRuntime<A>>>,
+    message_handlers: OnceLock<Vec<MessageHandler>>,
+    event_handlers: OnceLock<Vec<EventHandler>>,
 }
 
+type MessageBinding<A> =
+    Box<dyn Fn(&PluginMetadata, Arc<ActorRuntime<A>>, Duration) -> MessageHandler + Send + Sync>;
+type EventBinding<A> =
+    Box<dyn Fn(&PluginMetadata, Arc<ActorRuntime<A>>) -> EventHandler + Send + Sync>;
+
+#[derive(Clone)]
 enum MessageRouteSpec {
     Exact(String),
     Prefix(String),
@@ -110,7 +118,7 @@ where
         actor_factory: impl Fn() -> A + Send + Sync + 'static,
     ) -> Self {
         let actor_factory: Arc<dyn Fn() -> A + Send + Sync> = Arc::new(actor_factory);
-        let mailbox = ActorMailbox::default();
+        let mailbox = MailboxConfig::default();
         Self {
             metadata: PluginMetadata {
                 id: id.into(),
@@ -118,30 +126,14 @@ where
                 ..Default::default()
             },
             runtime: RuntimeConfig::default(),
-            mailbox: mailbox.clone(),
-            actor_runtime: Arc::new(ActorRuntime::new(
-                Arc::clone(&actor_factory),
-                mailbox.clone(),
-            )),
+            mailbox,
             actor_factory,
-            message_handlers: Vec::new(),
-            event_handlers: Vec::new(),
+            message_bindings: Vec::new(),
+            event_bindings: Vec::new(),
+            runtime_state: OnceLock::new(),
+            message_handlers: OnceLock::new(),
+            event_handlers: OnceLock::new(),
         }
-    }
-
-    pub fn description(mut self, desc: impl Into<String>) -> Self {
-        self.metadata.description = desc.into();
-        self
-    }
-
-    pub fn version(mut self, version: impl Into<String>) -> Self {
-        self.metadata.version = version.into();
-        self
-    }
-
-    pub fn author(mut self, author: impl Into<String>) -> Self {
-        self.metadata.author = author.into();
-        self
     }
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -159,12 +151,13 @@ where
         self
     }
 
-    pub fn mailbox(mut self, mailbox: ActorMailbox) -> Self {
-        self.actor_runtime = Arc::new(ActorRuntime::new(
-            Arc::clone(&self.actor_factory),
-            mailbox.clone(),
-        ));
-        self.mailbox = mailbox;
+    pub fn bounded_mailbox(mut self, capacity: usize) -> Self {
+        self.mailbox = MailboxConfig::Bounded(capacity);
+        self
+    }
+
+    pub fn unbounded_mailbox(mut self) -> Self {
+        self.mailbox = MailboxConfig::Unbounded;
         self
     }
 
@@ -250,27 +243,18 @@ where
     {
         let event_type = event_type.into();
         let handler_id = handler_id.into();
-        let topic = event_topic(&self.metadata.id, &handler_id);
-        install_message_bridge::<A, M>(&self.actor_runtime, topic.clone());
-        let func = build_event_publisher(
-            topic.clone(),
-            Arc::new(mapper),
-            Arc::clone(&self.actor_runtime),
-        );
-        self.event_handlers
-            .push(EventHandler::new(event_type, handler_id, func));
+        let mapper = Arc::new(mapper);
+        self.event_bindings.push(Box::new(move |metadata, runtime| {
+            let topic = event_topic(&metadata.id, &handler_id);
+            install_message_bridge::<A, M>(&runtime, topic.clone());
+            let func = build_event_publisher(topic, Arc::clone(&mapper), Arc::clone(&runtime));
+            EventHandler::new(event_type.clone(), handler_id.clone(), func)
+        }));
         self
     }
 
-    pub fn build(self) -> ActorPlugin<A> {
-        ActorPlugin {
-            metadata: self.metadata,
-            runtime: self.runtime,
-            mailbox: self.mailbox.clone(),
-            message_handlers: self.message_handlers,
-            event_handlers: self.event_handlers,
-            runtime_state: self.actor_runtime,
-        }
+    pub fn build(self) -> Self {
+        self
     }
 
     fn register_message_handler<M, F>(
@@ -285,40 +269,62 @@ where
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
         let handler_id = handler_id.into();
-        let topic = message_topic(&self.metadata.id, &handler_id);
-        install_message_bridge::<A, M>(&self.actor_runtime, topic.clone());
-        let func =
-            build_message_publisher(topic, Arc::new(mapper), Arc::clone(&self.actor_runtime));
-        let mut handler = route.into_handler(handler_id, func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
+        let mapper = Arc::new(mapper);
+        self.message_bindings
+            .push(Box::new(move |metadata, runtime, timeout| {
+                let topic = message_topic(&metadata.id, &handler_id);
+                install_message_bridge::<A, M>(&runtime, topic.clone());
+                let func =
+                    build_message_publisher(topic, Arc::clone(&mapper), Arc::clone(&runtime));
+                let mut handler = route.clone().into_handler(handler_id.clone(), func);
+                handler.timeout = timeout;
+                handler
+            }));
         self
+    }
+
+    fn runtime_state(&self) -> Arc<ActorRuntime<A>> {
+        self.runtime_state
+            .get_or_init(|| {
+                Arc::new(ActorRuntime::new(
+                    Arc::clone(&self.actor_factory),
+                    self.mailbox.clone(),
+                ))
+            })
+            .clone()
+    }
+
+    fn compiled_message_handlers(&self) -> &[MessageHandler] {
+        self.message_handlers.get_or_init(|| {
+            let runtime = self.runtime_state();
+            self.message_bindings
+                .iter()
+                .map(|binding| binding(&self.metadata, Arc::clone(&runtime), self.runtime.timeout))
+                .collect()
+        })
+    }
+
+    fn compiled_event_handlers(&self) -> &[EventHandler] {
+        self.event_handlers.get_or_init(|| {
+            let runtime = self.runtime_state();
+            self.event_bindings
+                .iter()
+                .map(|binding| binding(&self.metadata, Arc::clone(&runtime)))
+                .collect()
+        })
     }
 }
 
-pub struct ActorPlugin<A: Actor> {
-    metadata: PluginMetadata,
-    runtime: RuntimeConfig,
-    mailbox: ActorMailbox,
-    message_handlers: Vec<MessageHandler>,
-    event_handlers: Vec<EventHandler>,
-    runtime_state: Arc<ActorRuntime<A>>,
-}
-
-impl<A> ActorPlugin<A>
+impl<A> ActorPluginBuilder<A>
 where
     A: Actor<Args = A> + Spawn + Send + Sync + 'static,
 {
     pub async fn actor_ref(&self) -> ActorRef<A> {
-        self.runtime_state.actor_ref().await
-    }
-
-    pub fn mailbox(&self) -> &ActorMailbox {
-        &self.mailbox
+        self.runtime_state().actor_ref().await
     }
 }
 
-impl<A> Plugin for ActorPlugin<A>
+impl<A> Plugin for ActorPluginBuilder<A>
 where
     A: Actor<Args = A> + Spawn + Send + Sync + 'static,
 {
@@ -327,11 +333,11 @@ where
     }
 
     fn message_handlers(&self) -> &[MessageHandler] {
-        &self.message_handlers
+        self.compiled_message_handlers()
     }
 
     fn event_handlers(&self) -> &[EventHandler] {
-        &self.event_handlers
+        self.compiled_event_handlers()
     }
 
     fn runtime_config(&self) -> RuntimeConfig {
@@ -607,7 +613,7 @@ mod tests {
             .timeout(Duration::from_secs(9))
             .concurrency(8)
             .queue_strategy(QueueStrategy::DropOldest(32))
-            .mailbox(ActorMailbox::Unbounded)
+            .unbounded_mailbox()
             .build();
 
         assert_eq!(plugin.runtime_config().timeout, Duration::from_secs(9));
@@ -616,6 +622,15 @@ mod tests {
             plugin.runtime_config().queue_strategy,
             QueueStrategy::DropOldest(32)
         );
-        assert!(matches!(plugin.mailbox(), ActorMailbox::Unbounded));
+    }
+
+    #[test]
+    fn actor_plugin_builder_is_itself_a_plugin() {
+        let plugin = ActorPluginBuilder::new("count", "Count", || CountActor { seen: 0 })
+            .on_message("ping", "/ping", Ping);
+
+        let plugin: Arc<dyn Plugin> = Arc::new(plugin);
+        assert_eq!(plugin.metadata().id, "count");
+        assert_eq!(plugin.message_handlers().len(), 1);
     }
 }

@@ -55,9 +55,6 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let id = to_snake_case(&type_ident.to_string());
     let name = type_ident.to_string();
-    let version = "1.0.0".to_string();
-    let description = String::new();
-    let author = "Unknown".to_string();
     let init_expr = meta.init.unwrap_or_else(|| quote!(Self));
 
     // Collect handler methods, keeping them in the output (with custom attrs stripped)
@@ -162,9 +159,6 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #runtime::plugin::PluginMetadata {
                     id: String::from(#id),
                     name: String::from(#name),
-                    description: String::from(#description),
-                    version: String::from(#version),
-                    author: String::from(#author),
                 }
             });
         }

@@ -3,7 +3,7 @@
 离线示例，展示一个宿主如何通过 `RuntimeHost` 组装：
 
 - `PluginActor`
-- `Bot`
+- 运行时路由
 - `BaseAdapter` 事件下推
 
 运行：

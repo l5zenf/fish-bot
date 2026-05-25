@@ -4,14 +4,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kameo::message::{Context, Message};
 use kameo::prelude::*;
 use tokio::sync::Semaphore;
 
-use crate::handlers::{HandlerContext, MessageHandler};
+use crate::handlers::{
+    EventHandlerContext, EventHandlerFunc, HandlerContext, MessageHandler, RouteHint,
+};
 use crate::runtime::{QueueStrategy, RuntimeConfig};
 use crate::{BaseAdapter, Plugin, Result};
 use fish_core::ctx::Ctx;
-use fish_core::event::MessageEvent;
+use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
 
 /// Plugin actor — wraps a Plugin and processes HandleEvent messages in isolation.
@@ -158,12 +161,12 @@ impl PluginActor {
         }
     }
 
-    /// Accessor for the plugin reference (used by messages.rs).
+    /// Accessor for the wrapped plugin definition.
     pub fn plugin(&self) -> &Arc<dyn Plugin> {
         &self.plugin
     }
 
-    /// Accessor for the handler index (used by messages.rs).
+    /// Accessor for the precomputed handler lookup table.
     pub fn handler_index(&self) -> &std::collections::HashMap<String, usize> {
         &self.handler_index
     }
@@ -316,6 +319,117 @@ impl PluginActor {
     }
 }
 
+pub struct HandleEvent {
+    pub event: MessageEvent,
+    pub adapter: Arc<dyn BaseAdapter>,
+    pub ctx: Arc<Ctx>,
+    pub handler_id: Option<String>,
+    pub telemetry: Arc<Telemetry>,
+}
+
+impl Message<HandleEvent> for PluginActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HandleEvent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let plugin_id = self.plugin().metadata().id.clone();
+        let handlers = self.plugin().message_handlers();
+
+        let matched_handlers: Vec<&MessageHandler> = match &msg.handler_id {
+            Some(hid) => match self
+                .handler_index()
+                .get(hid)
+                .and_then(|&idx| handlers.get(idx))
+            {
+                Some(handler) => {
+                    let matched = match handler.route {
+                        RouteHint::Exact(_) | RouteHint::Prefix(_) | RouteHint::Keyword(_) => true,
+                        RouteHint::Regex | RouteHint::Fallback => match &handler.rule {
+                            Some(rule) => rule.check(&msg.event),
+                            None => true,
+                        },
+                    };
+                    if matched { vec![handler] } else { vec![] }
+                }
+                None => vec![],
+            },
+            None => handlers
+                .iter()
+                .filter(|h| match &h.rule {
+                    Some(rule) => rule.check(&msg.event),
+                    None => true,
+                })
+                .collect(),
+        };
+
+        for handler in matched_handlers {
+            self.dispatch_or_enqueue(
+                handler,
+                &plugin_id,
+                msg.event.clone(),
+                Arc::clone(&msg.adapter),
+                Arc::clone(&msg.ctx),
+                Arc::clone(&msg.telemetry),
+            )
+            .await;
+        }
+    }
+}
+
+pub struct HandleSystemEvent {
+    pub event: Arc<SystemEvent>,
+    pub adapter: Arc<dyn BaseAdapter>,
+    pub ctx: Arc<Ctx>,
+    pub handler_id: Option<String>,
+    pub telemetry: Arc<Telemetry>,
+}
+
+impl Message<HandleSystemEvent> for PluginActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HandleSystemEvent,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let plugin_id = self.plugin().metadata().id.clone();
+        let handlers = self.plugin().event_handlers();
+
+        let funcs: Vec<(String, EventHandlerFunc)> = match &msg.handler_id {
+            Some(hid) => handlers
+                .iter()
+                .filter(|h| &h.id == hid)
+                .map(|h| (h.id.clone(), Arc::clone(&h.func)))
+                .collect(),
+            None => handlers
+                .iter()
+                .filter(|h| h.event_type == msg.event.event_type)
+                .map(|h| (h.id.clone(), Arc::clone(&h.func)))
+                .collect(),
+        };
+
+        for (handler_id, func) in funcs {
+            let future = (func)(EventHandlerContext::__new(
+                Arc::clone(&msg.event),
+                Arc::clone(&msg.adapter),
+                Arc::clone(&msg.ctx),
+                Arc::clone(&msg.telemetry),
+                self.plugin_state.clone(),
+            ));
+            self.dispatch_event_or_enqueue(
+                &handler_id,
+                &plugin_id,
+                future,
+                Arc::clone(&msg.telemetry),
+            )
+            .await;
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -368,7 +482,6 @@ pub(crate) mod tests {
             meta: PluginMetadata {
                 id: "test".into(),
                 name: "test".into(),
-                description: "".into(),
                 ..Default::default()
             },
             handlers: vec![MessageHandler::new(
@@ -395,9 +508,6 @@ pub(crate) mod tests {
             serde_json::json!({}),
         )
     }
-
-    use crate::messages::HandleEvent;
-
     #[tokio::test(flavor = "multi_thread")]
     async fn t2_5_actor_new() {
         let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
@@ -427,7 +537,6 @@ pub(crate) mod tests {
             meta: PluginMetadata {
                 id: "flag".into(),
                 name: "".into(),
-                description: "".into(),
                 ..Default::default()
             },
             handlers: vec![MessageHandler::new(
@@ -481,7 +590,6 @@ pub(crate) mod tests {
             meta: PluginMetadata {
                 id: "flag".into(),
                 name: "".into(),
-                description: "".into(),
                 ..Default::default()
             },
             handlers: vec![MessageHandler::new(

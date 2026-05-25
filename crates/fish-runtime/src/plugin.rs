@@ -10,9 +10,6 @@ pub type PluginState = Arc<dyn Any + Send + Sync>;
 pub struct PluginMetadata {
     pub id: String,
     pub name: String,
-    pub description: String,
-    pub version: String,
-    pub author: String,
 }
 
 impl Default for PluginMetadata {
@@ -20,9 +17,6 @@ impl Default for PluginMetadata {
         Self {
             id: String::new(),
             name: String::new(),
-            description: String::new(),
-            version: "1.0.0".into(),
-            author: "Unknown".into(),
         }
     }
 }
@@ -60,8 +54,6 @@ mod tests {
         let meta = PluginMetadata::default();
         assert_eq!(meta.id, "");
         assert_eq!(meta.name, "");
-        assert_eq!(meta.version, "1.0.0");
-        assert_eq!(meta.author, "Unknown");
     }
 
     #[test]
@@ -105,15 +97,9 @@ mod tests {
         let meta = PluginMetadata {
             id: "custom".into(),
             name: "Custom".into(),
-            description: "desc".into(),
-            version: "2.0.0".into(),
-            author: "tester".into(),
         };
         assert_eq!(meta.id, "custom");
         assert_eq!(meta.name, "Custom");
-        assert_eq!(meta.description, "desc");
-        assert_eq!(meta.version, "2.0.0");
-        assert_eq!(meta.author, "tester");
         Ok(())
     }
 
@@ -149,14 +135,10 @@ mod tests {
         let meta = PluginMetadata {
             id: "clone_test".into(),
             name: "Clone".into(),
-            description: "desc".into(),
-            version: "3.0".into(),
-            author: "author".into(),
         };
         let cloned = meta.clone();
         assert_eq!(cloned.id, meta.id);
         assert_eq!(cloned.name, meta.name);
-        assert_eq!(cloned.version, meta.version);
         Ok(())
     }
 

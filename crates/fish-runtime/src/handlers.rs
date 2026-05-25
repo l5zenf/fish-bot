@@ -13,8 +13,8 @@ use fish_core::telemetry::Telemetry;
 use crate::BaseAdapter;
 use crate::plugin::PluginState;
 
-/// Route hint for Bot-level routing table.
-/// Allows Bot to pre-filter messages by text before dispatching to PluginActor.
+/// Route hint for runtime-level routing.
+/// Allows `RuntimeHost` to pre-filter messages before dispatching to `PluginActor`.
 #[derive(Debug, Clone)]
 pub enum RouteHint {
     Exact(Vec<String>),
@@ -253,7 +253,6 @@ mod tests {
                 meta: PluginMetadata {
                     id: "test".into(),
                     name: "测试插件".into(),
-                    description: "测试".into(),
                     ..Default::default()
                 },
                 handlers: vec![MessageHandler::new(
