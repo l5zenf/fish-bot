@@ -154,9 +154,9 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
             use super::*;
 
             pub(super) static METADATA: std::sync::LazyLock<
-                #runtime::plugin::PluginMetadata
+                #runtime::__private::PluginMetadata
             > = std::sync::LazyLock::new(|| {
-                #runtime::plugin::PluginMetadata {
+                #runtime::__private::PluginMetadata {
                     id: String::from(#id),
                     name: String::from(#name),
                 }
@@ -164,18 +164,18 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #runtime::Plugin for #struct_name {
-            fn metadata(&self) -> &#runtime::plugin::PluginMetadata {
+            fn metadata(&self) -> &#runtime::__private::PluginMetadata {
                 &__fish_plugin_meta::METADATA
             }
 
-            fn initial_state(&self) -> Option<#runtime::plugin::PluginState> {
+            fn initial_state(&self) -> Option<#runtime::__private::PluginState> {
                 Some(std::sync::Arc::new(tokio::sync::RwLock::new(
                     #struct_name::__fish_plugin_create_initial_state(),
                 )))
             }
 
-            fn message_handlers(&self) -> &[#runtime::handlers::MessageHandler] {
-                static HANDLERS: std::sync::LazyLock<Vec<#runtime::handlers::MessageHandler>> =
+            fn message_handlers(&self) -> &[#runtime::__private::MessageHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<#runtime::__private::MessageHandler>> =
                     std::sync::LazyLock::new(|| {
                         vec![
                             #(#msg_exprs),*
@@ -184,8 +184,8 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                 &HANDLERS
             }
 
-            fn event_handlers(&self) -> &[#runtime::handlers::EventHandler] {
-                static HANDLERS: std::sync::LazyLock<Vec<#runtime::handlers::EventHandler>> =
+            fn event_handlers(&self) -> &[#runtime::__private::EventHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<#runtime::__private::EventHandler>> =
                     std::sync::LazyLock::new(|| {
                         vec![
                             #(#event_exprs),*
@@ -218,7 +218,7 @@ fn gen_message_handler(
     let closure_body = match receiver {
         ReceiverKind::MutRef => {
             quote! {
-                std::sync::Arc::new(move |cx: #runtime::handlers::HandlerContext| {
+                std::sync::Arc::new(move |cx: #runtime::__private::HandlerContext| {
                     Box::pin(async move {
                         let mut plugin = cx.state_write::<#struct_name>().await?;
                         let event = cx.event;
@@ -233,7 +233,7 @@ fn gen_message_handler(
         }
         ReceiverKind::Ref => {
             quote! {
-                std::sync::Arc::new(move |cx: #runtime::handlers::HandlerContext| {
+                std::sync::Arc::new(move |cx: #runtime::__private::HandlerContext| {
                     Box::pin(async move {
                         let plugin = cx.state_read::<#struct_name>().await?;
                         let event = cx.event;
@@ -252,19 +252,19 @@ fn gen_message_handler(
     let kind = route.kind.as_deref().unwrap_or("exact");
     match kind {
         "prefix" => {
-            quote! { #runtime::handlers::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::__private::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
         }
         "regex" => {
-            quote! { #runtime::handlers::MessageHandler::regex(#hid, #pattern, #closure_body) }
+            quote! { #runtime::__private::MessageHandler::regex(#hid, #pattern, #closure_body) }
         }
         "fallback" => {
-            quote! { #runtime::handlers::MessageHandler::fallback(#hid, #closure_body) }
+            quote! { #runtime::__private::MessageHandler::fallback(#hid, #closure_body) }
         }
         "keyword" => {
-            quote! { #runtime::handlers::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::__private::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
         }
         "exact" => {
-            quote! { #runtime::handlers::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::__private::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
         }
         other => panic!("unsupported message kind: {other}"),
     }
@@ -316,10 +316,10 @@ fn gen_event_handler(
     };
 
     quote! {
-        #runtime::handlers::EventHandler::new(
+        #runtime::__private::EventHandler::new(
             #event_type,
             #hid,
-            std::sync::Arc::new(move |cx: #runtime::handlers::EventHandlerContext| { #closure_body }),
+            std::sync::Arc::new(move |cx: #runtime::__private::EventHandlerContext| { #closure_body }),
         )
     }
 }

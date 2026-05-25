@@ -5,7 +5,6 @@ fn http_err(e: reqwest::Error) -> AppError {
 }
 use crate::fish::auth::AuthManager;
 use crate::fish::sign::{generate_device_id, generate_sign};
-use fish_runtime::BaseAPI;
 use reqwest::header::HeaderValue;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -723,7 +722,6 @@ impl Clone for FishAPI {
     }
 }
 
-impl BaseAPI for FishAPI {}
 
 /// Simple URL encoder for form bodies.
 pub fn percent_encode(input: &str) -> String {

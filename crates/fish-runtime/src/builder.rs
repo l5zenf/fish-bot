@@ -112,18 +112,14 @@ impl<A> ActorPluginBuilder<A>
 where
     A: Actor<Args = A> + Spawn + Send + Sync + 'static,
 {
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        actor_factory: impl Fn() -> A + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new(actor_factory: impl Fn() -> A + Send + Sync + 'static) -> Self {
         let actor_factory: Arc<dyn Fn() -> A + Send + Sync> = Arc::new(actor_factory);
         let mailbox = MailboxConfig::default();
+        let name = type_label::<A>();
         Self {
             metadata: PluginMetadata {
-                id: id.into(),
-                name: name.into(),
-                ..Default::default()
+                id: to_snake_case(&name),
+                name,
             },
             runtime: RuntimeConfig::default(),
             mailbox,
@@ -134,6 +130,16 @@ where
             message_handlers: OnceLock::new(),
             event_handlers: OnceLock::new(),
         }
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.metadata.id = id.into();
+        self
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.metadata.name = name.into();
+        self
     }
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -163,7 +169,6 @@ where
 
     pub fn on_message<M, F>(
         self,
-        handler_id: impl Into<String>,
         pattern: impl Into<String>,
         mapper: F,
     ) -> Self
@@ -172,12 +177,11 @@ where
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        self.register_message_handler(handler_id, MessageRouteSpec::Exact(pattern.into()), mapper)
+        self.register_message_handler::<M, F>(MessageRouteSpec::Exact(pattern.into()), mapper)
     }
 
     pub fn on_prefix<M, F>(
         self,
-        handler_id: impl Into<String>,
         prefix: impl Into<String>,
         mapper: F,
     ) -> Self
@@ -186,12 +190,11 @@ where
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        self.register_message_handler(handler_id, MessageRouteSpec::Prefix(prefix.into()), mapper)
+        self.register_message_handler::<M, F>(MessageRouteSpec::Prefix(prefix.into()), mapper)
     }
 
     pub fn on_keyword<M, F>(
         self,
-        handler_id: impl Into<String>,
         keyword: impl Into<String>,
         mapper: F,
     ) -> Self
@@ -200,16 +203,11 @@ where
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        self.register_message_handler(
-            handler_id,
-            MessageRouteSpec::Keyword(keyword.into()),
-            mapper,
-        )
+        self.register_message_handler::<M, F>(MessageRouteSpec::Keyword(keyword.into()), mapper)
     }
 
     pub fn on_regex<M, F>(
         self,
-        handler_id: impl Into<String>,
         pattern: impl Into<String>,
         mapper: F,
     ) -> Self
@@ -218,22 +216,21 @@ where
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        self.register_message_handler(handler_id, MessageRouteSpec::Regex(pattern.into()), mapper)
+        self.register_message_handler::<M, F>(MessageRouteSpec::Regex(pattern.into()), mapper)
     }
 
-    pub fn on_fallback<M, F>(self, handler_id: impl Into<String>, mapper: F) -> Self
+    pub fn on_fallback<M, F>(self, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        self.register_message_handler(handler_id, MessageRouteSpec::Fallback, mapper)
+        self.register_message_handler::<M, F>(MessageRouteSpec::Fallback, mapper)
     }
 
     pub fn on_event<M, F>(
         mut self,
         event_type: impl Into<String>,
-        handler_id: impl Into<String>,
         mapper: F,
     ) -> Self
     where
@@ -242,7 +239,7 @@ where
         F: Fn(EventContext) -> M + Send + Sync + 'static,
     {
         let event_type = event_type.into();
-        let handler_id = handler_id.into();
+        let handler_id = derived_handler_id::<M>();
         let mapper = Arc::new(mapper);
         self.event_bindings.push(Box::new(move |metadata, runtime| {
             let topic = event_topic(&metadata.id, &handler_id);
@@ -253,13 +250,8 @@ where
         self
     }
 
-    pub fn build(self) -> Self {
-        self
-    }
-
     fn register_message_handler<M, F>(
         mut self,
-        handler_id: impl Into<String>,
         route: MessageRouteSpec,
         mapper: F,
     ) -> Self
@@ -268,7 +260,7 @@ where
         M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let handler_id = handler_id.into();
+        let handler_id = derived_handler_id::<M>();
         let mapper = Arc::new(mapper);
         self.message_bindings
             .push(Box::new(move |metadata, runtime, timeout| {
@@ -365,6 +357,42 @@ fn message_topic(plugin_id: &str, handler_id: &str) -> String {
 
 fn event_topic(plugin_id: &str, handler_id: &str) -> String {
     format!("plugin:{plugin_id}:event:{handler_id}")
+}
+
+fn derived_handler_id<M>() -> String {
+    to_snake_case(&type_label::<M>())
+}
+
+fn type_label<T>() -> String {
+    std::any::type_name::<T>()
+        .rsplit("::")
+        .next()
+        .unwrap_or("handler")
+        .to_string()
+}
+
+fn to_snake_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_is_lower_or_digit = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() {
+                if prev_is_lower_or_digit && !out.ends_with('_') {
+                    out.push('_');
+                }
+                out.push(ch.to_ascii_lowercase());
+                prev_is_lower_or_digit = false;
+            } else {
+                out.push(ch);
+                prev_is_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        } else if !out.ends_with('_') && !out.is_empty() {
+            out.push('_');
+            prev_is_lower_or_digit = false;
+        }
+    }
+
+    out.trim_matches('_').to_string()
 }
 
 fn build_message_publisher<A, M, F>(
@@ -465,7 +493,7 @@ where
 mod tests {
     use super::*;
     use crate::handlers::EventHandlerContext;
-    use crate::{ActorBusHandle, BaseAdapter, RuntimeActorBus};
+    use crate::{ActorBusHandle, BaseAdapter};
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
     use fish_core::message::MessageChain;
@@ -552,14 +580,13 @@ mod tests {
 
     #[tokio::test]
     async fn actor_plugin_routes_message_into_actor() -> anyhow::Result<()> {
-        let plugin = ActorPluginBuilder::new("count", "Count", || CountActor { seen: 0 })
-            .on_message("ping", "/ping", Ping)
-            .build();
+        let plugin = ActorPluginBuilder::new(|| CountActor { seen: 0 }).on_message("/ping", Ping);
 
         let app_ctx = Arc::new(fish_core::ctx::Ctx::new());
-        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+        app_ctx.insert(ActorBusHandle::runtime_default());
 
         let handler = &plugin.message_handlers()[0];
+        assert_eq!(handler.id, "ping");
         (handler.func)(HandlerContext::__new(
             fish_core::event::MessageEvent::new(
                 "cid".into(),
@@ -582,14 +609,14 @@ mod tests {
 
     #[tokio::test]
     async fn actor_plugin_routes_event_into_actor() -> anyhow::Result<()> {
-        let plugin = ActorPluginBuilder::new("count", "Count", || CountActor { seen: 0 })
-            .on_event("order_create", "order_created", OrderCreated)
-            .build();
+        let plugin =
+            ActorPluginBuilder::new(|| CountActor { seen: 0 }).on_event("order_create", OrderCreated);
 
         let app_ctx = Arc::new(fish_core::ctx::Ctx::new());
-        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+        app_ctx.insert(ActorBusHandle::runtime_default());
 
         let handler = &plugin.event_handlers()[0];
+        assert_eq!(handler.id, "order_created");
         (handler.func)(EventHandlerContext::__new(
             Arc::new(fish_core::event::SystemEvent::new(
                 "order_create",
@@ -609,12 +636,11 @@ mod tests {
 
     #[test]
     fn actor_plugin_builder_preserves_runtime_config() {
-        let plugin = ActorPluginBuilder::new("count", "Count", || CountActor { seen: 0 })
+        let plugin = ActorPluginBuilder::new(|| CountActor { seen: 0 })
             .timeout(Duration::from_secs(9))
             .concurrency(8)
             .queue_strategy(QueueStrategy::DropOldest(32))
-            .unbounded_mailbox()
-            .build();
+            .unbounded_mailbox();
 
         assert_eq!(plugin.runtime_config().timeout, Duration::from_secs(9));
         assert_eq!(plugin.runtime_config().concurrency, 8);
@@ -626,11 +652,22 @@ mod tests {
 
     #[test]
     fn actor_plugin_builder_is_itself_a_plugin() {
-        let plugin = ActorPluginBuilder::new("count", "Count", || CountActor { seen: 0 })
-            .on_message("ping", "/ping", Ping);
+        let plugin = ActorPluginBuilder::new(|| CountActor { seen: 0 }).on_message("/ping", Ping);
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
-        assert_eq!(plugin.metadata().id, "count");
+        assert_eq!(plugin.metadata().id, "count_actor");
+        assert_eq!(plugin.metadata().name, "CountActor");
         assert_eq!(plugin.message_handlers().len(), 1);
+    }
+
+    #[test]
+    fn actor_plugin_builder_allows_metadata_override() {
+        let plugin = ActorPluginBuilder::new(|| CountActor { seen: 0 })
+            .id("count")
+            .name("Count")
+            .on_message("/ping", Ping);
+
+        assert_eq!(plugin.metadata().id, "count");
+        assert_eq!(plugin.metadata().name, "Count");
     }
 }

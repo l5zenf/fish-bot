@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use fish_core::BaseAdapter;
 use fish_core::error::Result;
+use fish_core::telemetry::Telemetry;
 use fish_runtime::RuntimeHost;
 use fish_runtime::prelude::*;
 

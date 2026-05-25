@@ -365,9 +365,11 @@ impl Message<CurrentValue> for CounterActor {
     }
 }
 
-let plugin = ActorPluginBuilder::new("counter", "Counter", || CounterActor { value: 0 })
+let plugin = ActorPluginBuilder::new(|| CounterActor { value: 0 })
+    .id("counter")
+    .name("Counter")
     .bounded_mailbox(128)
-    .on_message("incr", "/incr", Incr);
+    .on_message("/incr", Incr);
 ```
 
 这条路的重点不是“再包一层 handler 闭包”，而是：
@@ -375,7 +377,9 @@ let plugin = ActorPluginBuilder::new("counter", "Counter", || CounterActor { val
 - 你定义的是 actor 本身
 - 路由只负责把 `MessageContext` / `EventContext` 映射成 typed message
 - 插件内部状态在 actor 里，不在 `RwLock<T>` 里
-- builder 本身就是最终插件定义，`.build()` 只是可选收口
+- builder 本身就是最终插件定义
+- `id/name` 默认从 actor 类型名派生，只有需要覆写时才显式设置
+- 内部 handler id 从消息类型自动派生，不再要求作者手填
 - mailbox 只是 builder 上的一个配置点，不再额外引入公开类型
 - 需要时可以直接拿 `actor_ref()` 做 `ask` / `tell`
 

@@ -1,23 +1,24 @@
 // Make the crate referable by its crate name for proc-macro generated code.
 extern crate self as fish_runtime;
 
-pub mod actor;
-pub mod builder;
-pub mod bus;
-pub mod context;
-pub mod fish;
-pub mod handlers;
-pub mod host;
-pub mod plugin;
+mod actor;
+mod builder;
+mod bus;
+mod context;
+mod fish;
+mod handlers;
+mod host;
+mod plugin;
 pub mod prelude;
-pub mod runtime;
+mod runtime;
 
 pub use builder::ActorPluginBuilder;
-pub use bus::{ActorBus, ActorBusHandle, RuntimeActorBus};
+pub use bus::ActorBusHandle;
 pub use context::{EventContext, MessageContext};
 pub use fish::FishWebSocketAdapter;
 pub use host::RuntimeHost;
 pub use plugin::Plugin;
+pub use runtime::QueueStrategy;
 
 pub use fish_core::ctx::Ctx;
 pub use fish_core::error::{AppError, Result};
@@ -25,9 +26,15 @@ pub use fish_core::event::{MessageEvent, SystemEvent};
 pub use fish_core::message::{MessageChain, MessageChainItem, MessageSegment};
 pub use fish_core::rule::{MatchList, Rule, is_fullmatch, is_keywords, is_regex, is_startswith};
 pub use fish_core::telemetry::Telemetry;
-pub use fish_core::{AdapterEventSink, BaseAPI, BaseAdapter};
+pub use fish_core::{AdapterEventSink, BaseAdapter};
 
 pub use fish_plugin_macros::plugin;
+
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::handlers::{EventHandler, EventHandlerContext, HandlerContext, MessageHandler};
+    pub use crate::plugin::{PluginMetadata, PluginState};
+}
 
 #[cfg(test)]
 mod api_tests {

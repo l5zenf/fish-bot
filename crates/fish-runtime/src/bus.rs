@@ -12,7 +12,7 @@ pub type BusPayload = Arc<dyn Any + Send + Sync>;
 pub type BusFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub type BusHandler = Arc<dyn Fn(BusPayload) -> BusFuture + Send + Sync>;
 
-pub trait ActorBus: Send + Sync + 'static {
+pub(crate) trait ActorBus: Send + Sync + 'static {
     fn publish_raw(&self, topic: String, payload: BusPayload) -> BusFuture;
 
     fn subscribe_raw(&self, topic: String, handler: BusHandler);
@@ -24,8 +24,12 @@ pub struct ActorBusHandle {
 }
 
 impl ActorBusHandle {
-    pub fn new(inner: Arc<dyn ActorBus>) -> Self {
+    pub(crate) fn new(inner: Arc<dyn ActorBus>) -> Self {
         Self { inner }
+    }
+
+    pub(crate) fn runtime_default() -> Self {
+        Self::new(Arc::new(RuntimeActorBus::default()))
     }
 
     pub async fn publish<T>(&self, topic: impl Into<String>, payload: T) -> Result<()>
@@ -60,7 +64,7 @@ impl ActorBusHandle {
 }
 
 #[derive(Default)]
-pub struct RuntimeActorBus {
+pub(crate) struct RuntimeActorBus {
     subscribers: RwLock<HashMap<String, Vec<BusHandler>>>,
 }
 

@@ -142,7 +142,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::{ActorBusHandle, RuntimeActorBus};
+    use crate::ActorBusHandle;
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
 
@@ -203,7 +203,7 @@ mod tests {
     #[tokio::test]
     async fn t3_2_message_context_exposes_runtime_bus() -> Result<()> {
         let app_ctx = Arc::new(Ctx::new());
-        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+        app_ctx.insert(ActorBusHandle::runtime_default());
 
         let ctx = MessageContext::new(
             MessageEvent::new(

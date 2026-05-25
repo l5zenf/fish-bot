@@ -9,7 +9,7 @@ use fish_core::event::{MessageEvent, SystemEvent};
 
 use crate::actor::{HandleEvent, HandleSystemEvent, PluginActor};
 use crate::handlers::RouteHint;
-use crate::{ActorBusHandle, BaseAdapter, Ctx, Plugin, Result, RuntimeActorBus, Telemetry};
+use crate::{ActorBusHandle, BaseAdapter, Ctx, Plugin, Result, Telemetry};
 
 pub struct RuntimeHost {
     adapter: Arc<dyn BaseAdapter>,
@@ -24,7 +24,7 @@ impl RuntimeHost {
         telemetry: Arc<Telemetry>,
     ) -> Self {
         if ctx.get::<ActorBusHandle>().is_none() {
-            ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+            ctx.insert(ActorBusHandle::runtime_default());
         }
 
         let plugin_refs = plugins

@@ -4,8 +4,6 @@ use crate::error::Result;
 use crate::event::{MessageEvent, SystemEvent};
 use crate::message::MessageChain;
 
-pub trait BaseAPI: Send + Sync {}
-
 #[async_trait]
 pub trait AdapterEventSink: Send + Sync {
     async fn handle_message(&self, event: MessageEvent) -> Result<()>;

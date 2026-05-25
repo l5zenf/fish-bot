@@ -6,4 +6,4 @@ pub mod message;
 pub mod rule;
 pub mod telemetry;
 
-pub use adapter::{AdapterEventSink, BaseAPI, BaseAdapter};
+pub use adapter::{AdapterEventSink, BaseAdapter};
