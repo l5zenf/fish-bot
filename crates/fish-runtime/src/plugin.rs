@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,10 +7,13 @@ use std::time::Duration;
 use fish_core::ctx::Ctx;
 use fish_core::error::{AppError, Result};
 use fish_core::event::{MessageEvent, SystemEvent};
+use fish_core::message::MessageChain;
 use fish_core::rule::{Rule, is_fullmatch, is_keywords, is_regex, is_startswith};
 use fish_core::telemetry::Telemetry;
 
 use crate::BaseAdapter;
+
+pub type PluginState = Arc<dyn Any + Send + Sync>;
 
 /// Plugin metadata.
 #[derive(Debug, Clone)]
@@ -119,17 +121,16 @@ pub struct HandlerContext {
     pub adapter: Arc<dyn BaseAdapter>,
     pub app_ctx: Arc<Ctx>,
     pub telemetry: Arc<Telemetry>,
-    plugin_state: Option<Arc<dyn Any + Send + Sync>>,
+    plugin_state: Option<PluginState>,
 }
 
 impl HandlerContext {
-    #[doc(hidden)]
-    pub fn __new(
+    pub(crate) fn __new(
         event: MessageEvent,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,
         telemetry: Arc<Telemetry>,
-        plugin_state: Option<Arc<dyn Any + Send + Sync>>,
+        plugin_state: Option<PluginState>,
     ) -> Self {
         Self {
             event,
@@ -140,16 +141,38 @@ impl HandlerContext {
         }
     }
 
-    #[doc(hidden)]
-    pub fn __plugin_state(&self) -> &Option<Arc<dyn Any + Send + Sync>> {
-        &self.plugin_state
-    }
-
     pub fn state<T: Send + Sync + 'static>(&self) -> Result<Arc<tokio::sync::RwLock<T>>> {
         self.plugin_state
             .clone()
             .and_then(|state| state.downcast::<tokio::sync::RwLock<T>>().ok())
             .ok_or_else(|| AppError::internal("typed plugin state is unavailable"))
+    }
+
+    pub async fn state_read<T: Send + Sync + 'static>(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<T>> {
+        Ok(self.state::<T>()?.read_owned().await)
+    }
+
+    pub async fn state_write<T: Send + Sync + 'static>(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<T>> {
+        Ok(self.state::<T>()?.write_owned().await)
+    }
+
+    pub async fn reply(&self, msg: impl Into<MessageChain>) -> Result<()> {
+        let message = msg.into();
+        if let Err(err) = self
+            .adapter
+            .send(&self.event.sender_id, &message, Some(&self.event.cid))
+            .await
+        {
+            self.telemetry
+                .reply_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(err);
+        }
+        Ok(())
     }
 }
 
@@ -158,17 +181,16 @@ pub struct EventHandlerContext {
     pub adapter: Arc<dyn BaseAdapter>,
     pub app_ctx: Arc<Ctx>,
     pub telemetry: Arc<Telemetry>,
-    plugin_state: Option<Arc<dyn Any + Send + Sync>>,
+    plugin_state: Option<PluginState>,
 }
 
 impl EventHandlerContext {
-    #[doc(hidden)]
-    pub fn __new(
+    pub(crate) fn __new(
         event: Arc<SystemEvent>,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,
         telemetry: Arc<Telemetry>,
-        plugin_state: Option<Arc<dyn Any + Send + Sync>>,
+        plugin_state: Option<PluginState>,
     ) -> Self {
         Self {
             event,
@@ -179,16 +201,23 @@ impl EventHandlerContext {
         }
     }
 
-    #[doc(hidden)]
-    pub fn __plugin_state(&self) -> &Option<Arc<dyn Any + Send + Sync>> {
-        &self.plugin_state
-    }
-
     pub fn state<T: Send + Sync + 'static>(&self) -> Result<Arc<tokio::sync::RwLock<T>>> {
         self.plugin_state
             .clone()
             .and_then(|state| state.downcast::<tokio::sync::RwLock<T>>().ok())
             .ok_or_else(|| AppError::internal("typed plugin state is unavailable"))
+    }
+
+    pub async fn state_read<T: Send + Sync + 'static>(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<T>> {
+        Ok(self.state::<T>()?.read_owned().await)
+    }
+
+    pub async fn state_write<T: Send + Sync + 'static>(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<T>> {
+        Ok(self.state::<T>()?.write_owned().await)
     }
 }
 
@@ -296,6 +325,7 @@ pub type EventHandlerFunc = Arc<dyn Fn(EventHandlerContext) -> EventHandlerFutur
 /// Handles non-message events (notices, business events like trade orders, etc.).
 #[derive(Clone)]
 pub struct EventHandler {
+    pub event_type: String,
     pub id: String,
     pub func: EventHandlerFunc,
     pub rule: Option<Rule>,
@@ -303,8 +333,13 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Create a new event handler with the given id and function.
-    pub fn new(id: impl Into<String>, func: EventHandlerFunc) -> Self {
+    pub fn new(
+        event_type: impl Into<String>,
+        id: impl Into<String>,
+        func: EventHandlerFunc,
+    ) -> Self {
         Self {
+            event_type: event_type.into(),
             id: id.into(),
             func,
             rule: None,
@@ -322,8 +357,8 @@ pub trait Plugin: Send + Sync + 'static {
     }
 
     /// Event handlers keyed by event type (e.g. "notice", "request", "meta_event").
-    fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
-        HashMap::new()
+    fn event_handlers(&self) -> &[EventHandler] {
+        &[]
     }
 
     /// Quick-check whether this plugin supports the given event.
@@ -359,47 +394,9 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// Create initial mutable state for this plugin.
     /// Override in stateful plugins. Returns None for stateless plugins.
-    #[doc(hidden)]
-    fn __initial_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+    fn initial_state(&self) -> Option<PluginState> {
         None
     }
-}
-
-/// A plugin that maintains mutable state across handler invocations.
-/// State lives inside the PluginActor, one instance per actor.
-///
-/// Implement this trait instead of `Plugin` for plugins with mutable state.
-pub trait StatefulPlugin: Plugin {
-    /// The state type this plugin maintains.
-    type State: Send + Sync + 'static;
-
-    /// Create the initial state.
-    fn create_initial_state(&self) -> Self::State;
-}
-
-/// Helper to implement `__initial_state` for any `StatefulPlugin`.
-///
-/// Call this inside your `Plugin::__initial_state()` override:
-/// ```ignore
-/// fn __initial_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-///     Some(stateful_initial_state(self))
-/// }
-/// ```
-#[doc(hidden)]
-pub fn stateful_initial_state<P: StatefulPlugin>(plugin: &P) -> Arc<dyn Any + Send + Sync> {
-    let state = tokio::sync::RwLock::new(plugin.create_initial_state());
-    Arc::new(state) as Arc<dyn Any + Send + Sync>
-}
-
-#[doc(hidden)]
-pub fn __state_lock_tokio<T: Send + Sync + 'static>(
-    state: &Option<Arc<dyn Any + Send + Sync>>,
-) -> Arc<tokio::sync::RwLock<T>> {
-    state
-        .clone()
-        .expect("stateful plugin: plugin_state is None")
-        .downcast::<tokio::sync::RwLock<T>>()
-        .expect("plugin_state type mismatch")
 }
 
 #[cfg(test)]
@@ -520,7 +517,12 @@ mod tests {
 
     #[test]
     fn t2_20_event_handler_construct() -> anyhow::Result<()> {
-        let handler = EventHandler::new("test_event", Arc::new(|_| Box::pin(async { Ok(()) })));
+        let handler = EventHandler::new(
+            "notice",
+            "test_event",
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+        );
+        assert_eq!(handler.event_type, "notice");
         assert_eq!(handler.id, "test_event");
         assert!(handler.rule.is_none());
         Ok(())
@@ -535,16 +537,16 @@ mod tests {
             fn metadata(&self) -> &PluginMetadata {
                 &self.meta
             }
-            fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
-                let mut map = HashMap::new();
-                map.insert(
-                    "notice".into(),
-                    vec![EventHandler::new(
-                        "notice_handler",
-                        Arc::new(|_| Box::pin(async { Ok(()) })),
-                    )],
-                );
-                map
+            fn event_handlers(&self) -> &[EventHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<EventHandler>> =
+                    std::sync::LazyLock::new(|| {
+                        vec![EventHandler::new(
+                            "notice",
+                            "notice_handler",
+                            Arc::new(|_| Box::pin(async { Ok(()) })),
+                        )]
+                    });
+                &HANDLERS
             }
         }
 
@@ -556,7 +558,7 @@ mod tests {
         };
         let handlers = plugin.event_handlers();
         assert_eq!(handlers.len(), 1);
-        assert!(handlers.contains_key("notice"));
+        assert_eq!(handlers[0].event_type, "notice");
         Ok(())
     }
 
@@ -578,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn t2_34_stateful_initial_state_wraps_rwlock() -> anyhow::Result<()> {
+    fn t2_34_initial_state_wraps_rwlock() -> anyhow::Result<()> {
         struct StatefulTestPlugin;
         impl Plugin for StatefulTestPlugin {
             fn metadata(&self) -> &PluginMetadata {
@@ -586,16 +588,12 @@ mod tests {
                     std::sync::LazyLock::new(PluginMetadata::default);
                 &META
             }
-        }
-        impl StatefulPlugin for StatefulTestPlugin {
-            type State = usize;
-
-            fn create_initial_state(&self) -> Self::State {
-                7
+            fn initial_state(&self) -> Option<PluginState> {
+                Some(Arc::new(tokio::sync::RwLock::new(7usize)))
             }
         }
 
-        let state = stateful_initial_state(&StatefulTestPlugin);
+        let state = StatefulTestPlugin.initial_state().expect("state should exist");
         let lock = state
             .clone()
             .downcast::<tokio::sync::RwLock<usize>>()

@@ -7,7 +7,6 @@ pub mod builder;
 pub mod context;
 pub mod fish;
 pub mod host;
-pub mod loader;
 pub mod messages;
 pub mod plugin;
 pub mod prelude;
@@ -15,18 +14,15 @@ pub mod prelude;
 pub use bot::{Bot, DispatchEvent, DispatchSystemEvent};
 pub use actor::PluginActor;
 pub use builder::{BuiltPlugin, PluginBuilder};
-pub use context::Context;
+pub use context::{EventContext, MessageContext};
 pub use fish::FishWebSocketAdapter;
 pub use host::RuntimeHost;
-pub use loader::PluginManager;
 pub use messages::{HandleEvent, HandleSystemEvent};
 pub use plugin::{
     Capability, EventHandler, EventHandlerContext, EventHandlerFunc, EventHandlerFuture,
     HandlerContext, HandlerFunc, HandlerFuture, MessageHandler, Plugin, PluginManifest,
-    PluginMetadata, QueueStrategy, RouteHint, RuntimeConfig, StatefulPlugin, stateful_initial_state,
+    PluginMetadata, PluginState, QueueStrategy, RouteHint, RuntimeConfig,
 };
-#[doc(hidden)]
-pub use plugin::__state_lock_tokio;
 
 pub use fish_core::ctx::Ctx;
 pub use fish_core::error::{AppError, Result};
@@ -36,7 +32,7 @@ pub use fish_core::rule::{MatchList, Rule, is_fullmatch, is_keywords, is_regex, 
 pub use fish_core::telemetry::Telemetry;
 pub use fish_core::{AdapterEventSink, BaseAPI, BaseAdapter};
 
-pub use fish_plugin_macros::{plugin, plugin_handlers};
+pub use fish_plugin_macros::plugin;
 
 #[cfg(test)]
 mod api_tests {
@@ -45,22 +41,49 @@ mod api_tests {
     #[test]
     fn runtime_exposes_plugin_author_api() {
         use fish_runtime::prelude::*;
-        use fish_runtime::{plugin, plugin_handlers};
+        use fish_runtime::plugin;
 
-        #[plugin(id = "runtime_api", name = "Runtime API")]
-        #[derive(Default)]
         struct RuntimeApiPlugin;
 
-        #[plugin_handlers]
+        #[plugin]
         impl RuntimeApiPlugin {
-            #[command("/ping")]
-            async fn ping(&mut self, _ctx: Context) -> Result<()> {
+            #[message("/ping")]
+            async fn ping(&mut self, _ctx: MessageContext) -> Result<()> {
                 Ok(())
             }
         }
 
         let plugin = RuntimeApiPlugin;
-        assert_eq!(plugin.metadata().id, "runtime_api");
+        assert_eq!(plugin.metadata().id, "runtime_api_plugin");
+        assert_eq!(plugin.metadata().name, "RuntimeApiPlugin");
         assert_eq!(plugin.message_handlers().len(), 1);
+    }
+
+    #[test]
+    fn runtime_plugin_accepts_rust_init_expression() {
+        use fish_runtime::prelude::*;
+        use fish_runtime::plugin;
+
+        struct CounterPlugin {
+            value: u64,
+        }
+
+        #[plugin(Self { value: 7 })]
+        impl CounterPlugin {
+            #[message("/value")]
+            async fn value(&self, _ctx: MessageContext) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let plugin = CounterPlugin { value: 0 };
+        let state = plugin
+            .initial_state()
+            .expect("stateful plugin should expose initial state");
+        let state = state
+            .downcast::<tokio::sync::RwLock<CounterPlugin>>()
+            .expect("plugin state should downcast to typed lock");
+        let state = state.try_read().expect("initial state lock should be readable");
+        assert_eq!(state.value, 7);
     }
 }

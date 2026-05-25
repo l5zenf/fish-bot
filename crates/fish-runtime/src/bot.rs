@@ -6,7 +6,6 @@ use kameo::prelude::*;
 
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
-use fish_core::message::{MessageChain, MessageSegment};
 use fish_core::telemetry::Telemetry;
 use crate::{BaseAdapter, HandleEvent, HandleSystemEvent, Plugin, PluginActor, RouteHint};
 
@@ -98,17 +97,15 @@ impl Bot {
                 }
             }
 
-            // Event handlers: event_type → handlers
-            for (event_type, event_handlers) in plugin.event_handlers() {
-                for handler in event_handlers {
-                    event_routes
-                        .entry(event_type.clone())
-                        .or_default()
-                        .push(RouteTarget {
-                            plugin_ref: plugin_ref.clone(),
-                            handler_id: handler.id.clone(),
-                        });
-                }
+            // Event handlers
+            for handler in plugin.event_handlers() {
+                event_routes
+                    .entry(handler.event_type.clone())
+                    .or_default()
+                    .push(RouteTarget {
+                        plugin_ref: plugin_ref.clone(),
+                        handler_id: handler.id.clone(),
+                    });
             }
         }
 
@@ -144,32 +141,10 @@ impl Message<DispatchEvent> for Bot {
             .messages_received
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Create reply callback bound to this event's sender
-        let reply_adapter = Arc::clone(&self.adapter);
-        let reply_cid = msg.event.cid.clone();
-        let reply_target = msg.event.sender_id.clone();
-        let reply_telemetry = Arc::clone(&self.telemetry);
-
-        let mut event = msg.event;
-        event.set_callback(move |reply_msg: MessageSegment| {
-            let adapter = Arc::clone(&reply_adapter);
-            let target = reply_target.clone();
-            let cid = reply_cid.clone();
-            let telemetry = Arc::clone(&reply_telemetry);
-            Box::pin(async move {
-                let chain = MessageChain::from(reply_msg);
-                if let Err(e) = adapter.send(&target, &chain, Some(&cid)).await {
-                    tracing::error!("Failed to send reply: {}", e);
-                    telemetry
-                        .reply_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            })
-        });
-
         let adapter = Arc::clone(&self.adapter);
         let ctx = Arc::clone(&self.ctx);
         let telemetry = Arc::clone(&self.telemetry);
+        let event = msg.event;
 
         // Route the event using the pre-compiled routing table.
         let text = event.plain_text();
@@ -292,6 +267,7 @@ mod tests {
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
     use fish_core::error::{AppError, Result};
+    use fish_core::message::MessageChain;
     use fish_core::rule::is_fullmatch;
     use fish_core::telemetry::Telemetry;
     use fish_runtime::BaseAdapter;
@@ -364,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn t4_3_dispatch_sets_callback() {
+    async fn t4_3_dispatch_replies_via_adapter() {
         let recorded = Arc::new(tokio::sync::Mutex::new(String::new()));
         let recorded_clone = Arc::clone(&recorded);
 
@@ -412,10 +388,9 @@ mod tests {
                 RouteHint::Fallback,
                 None,
                 Arc::new(|cx: HandlerContext| {
-                    let event = cx.event;
-                    let content = event.plain_text();
+                    let content = cx.event.plain_text();
                     Box::pin(async move {
-                        let _ = event.reply(MessageSegment::text(content)).await;
+                        let _ = cx.reply(content).await;
                         Ok(())
                     })
                 }),
@@ -464,10 +439,11 @@ mod tests {
             Arc::new(Telemetry::new()),
         ));
 
-        let mut event = make_event("/ping");
-        event.set_callback(|_| Box::pin(async {}));
-
-        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        let _ = bot_ref
+            .tell(DispatchEvent {
+                event: make_event("/ping"),
+            })
+            .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         assert_eq!(count1.load(Ordering::SeqCst), 1);
@@ -480,10 +456,11 @@ mod tests {
         let ctx = Arc::new(Ctx::new());
         let bot_ref = Bot::spawn(Bot::new(adapter, vec![], ctx, Arc::new(Telemetry::new())));
 
-        let mut event = make_event("/ping");
-        event.set_callback(|_| Box::pin(async {}));
-
-        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        let _ = bot_ref
+            .tell(DispatchEvent {
+                event: make_event("/ping"),
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -526,7 +503,7 @@ mod tests {
                 None,
                 Arc::new(|cx: HandlerContext| {
                     Box::pin(async move {
-                        let _ = cx.event.reply(MessageSegment::text("reply")).await;
+                        let _ = cx.reply("reply").await;
                         Ok(())
                     })
                 }),
@@ -541,10 +518,11 @@ mod tests {
             Arc::new(Telemetry::new()),
         ));
 
-        let mut event = make_event("/test");
-        event.set_callback(|_| Box::pin(async {}));
-
-        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        let _ = bot_ref
+            .tell(DispatchEvent {
+                event: make_event("/test"),
+            })
+            .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         Ok(())
     }
@@ -599,10 +577,11 @@ mod tests {
             Arc::new(Telemetry::new()),
         ));
 
-        let mut event = make_event("/skip");
-        event.set_callback(|_| Box::pin(async {}));
-
-        let _ = bot_ref.tell(DispatchEvent { event }).await;
+        let _ = bot_ref
+            .tell(DispatchEvent {
+                event: make_event("/skip"),
+            })
+            .await;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         assert!(
@@ -662,10 +641,7 @@ mod tests {
                 None,
                 Arc::new(|cx: HandlerContext| {
                     Box::pin(async move {
-                        let _ = cx
-                            .event
-                            .reply(MessageSegment::text("multi segment reply"))
-                            .await;
+                        let _ = cx.reply("multi segment reply").await;
                         Ok(())
                     })
                 }),

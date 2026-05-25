@@ -1,11 +1,14 @@
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kameo::prelude::*;
 use tokio::sync::Semaphore;
 
 use crate::{
-    BaseAdapter, HandlerContext, HandlerFunc, MessageHandler, Plugin, QueueStrategy, RuntimeConfig,
+    BaseAdapter, HandlerContext, MessageHandler, Plugin, QueueStrategy, Result, RuntimeConfig,
 };
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
@@ -27,15 +30,18 @@ pub struct PluginActor {
     queue_notify: Option<Arc<tokio::sync::Notify>>,
     /// Optional mutable plugin state (for stateful plugins).
     pub(crate) plugin_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    default_timeout: Duration,
 }
 
 /// A task queued for later processing when the plugin is at capacity.
+type TaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
 pub(super) struct PendingTask {
-    pub(super) func: HandlerFunc,
     pub(super) handler_id: String,
     pub(super) handler_timeout: std::time::Duration,
     pub(super) plugin_id: String,
-    pub(super) cx: HandlerContext,
+    pub(super) future: TaskFuture,
+    pub(super) telemetry: Arc<Telemetry>,
 }
 
 impl PluginActor {
@@ -62,7 +68,7 @@ impl PluginActor {
             .collect();
 
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
-        let plugin_state = plugin.__initial_state();
+        let plugin_state = plugin.initial_state();
 
         let (pending_queue, queue_notify) = match &config.queue_strategy {
             QueueStrategy::DropNewest => (None, None),
@@ -85,18 +91,14 @@ impl PluginActor {
                         match task {
                             Some(task) => {
                                 let permit = Arc::clone(&processor_semaphore).acquire_owned().await;
-                                let queued_telemetry = Arc::clone(&task.cx.telemetry);
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     let started = std::time::Instant::now();
-                                    let result = tokio::time::timeout(
-                                        task.handler_timeout,
-                                        (task.func)(task.cx),
-                                    )
-                                    .await;
+                                    let result =
+                                        tokio::time::timeout(task.handler_timeout, task.future).await;
                                     match result {
                                         Ok(Ok(())) => {
-                                            queued_telemetry
+                                            task.telemetry
                                                 .queued_handler_succeeded
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::debug!(
@@ -107,7 +109,7 @@ impl PluginActor {
                                             );
                                         }
                                         Ok(Err(e)) => {
-                                            queued_telemetry
+                                            task.telemetry
                                                 .queued_handler_failed
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::error!(
@@ -119,7 +121,7 @@ impl PluginActor {
                                             );
                                         }
                                         Err(_) => {
-                                            queued_telemetry
+                                            task.telemetry
                                                 .queued_handler_timed_out
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::warn!(
@@ -151,6 +153,7 @@ impl PluginActor {
             pending_queue,
             queue_notify,
             plugin_state,
+            default_timeout: config.timeout,
         }
     }
 
@@ -164,14 +167,12 @@ impl PluginActor {
         &self.handler_index
     }
 
-    /// Try to acquire a permit or enqueue the task per the queue strategy.
-    pub(crate) async fn dispatch_or_enqueue(
+    async fn dispatch_task_or_enqueue(
         &self,
-        handler: &MessageHandler,
+        handler_id: &str,
+        handler_timeout: Duration,
         plugin_id: &str,
-        event: MessageEvent,
-        adapter: Arc<dyn BaseAdapter>,
-        ctx: Arc<Ctx>,
+        future: TaskFuture,
         telemetry: Arc<Telemetry>,
     ) {
         telemetry
@@ -188,7 +189,7 @@ impl PluginActor {
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             plugin = %plugin_id,
-                            handler = %handler.id,
+                            handler = %handler_id,
                             "plugin busy, dropping event"
                         );
                         return;
@@ -199,24 +200,18 @@ impl PluginActor {
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             plugin = %plugin_id,
-                            handler = %handler.id,
+                            handler = %handler_id,
                             "plugin busy, enqueuing event"
                         );
                         if let (Some(queue), Some(notify)) =
                             (&self.pending_queue, &self.queue_notify)
                         {
                             let task = PendingTask {
-                                func: handler.func.clone(),
-                                handler_id: handler.id.clone(),
-                                handler_timeout: handler.timeout,
+                                handler_id: handler_id.to_string(),
+                                handler_timeout,
                                 plugin_id: plugin_id.to_string(),
-                                cx: HandlerContext::__new(
-                                    event,
-                                    adapter.clone(),
-                                    ctx.clone(),
-                                    Arc::clone(&telemetry),
-                                    self.plugin_state.clone(),
-                                ),
+                                future,
+                                telemetry: Arc::clone(&telemetry),
                             };
                             let mut q = queue.lock().await;
                             if q.len() >= max_queue {
@@ -235,22 +230,13 @@ impl PluginActor {
         };
 
         // Got a permit — spawn directly
-        let func = handler.func.clone();
-        let handler_id = handler.id.clone();
-        let handler_timeout = handler.timeout;
+        let handler_id = handler_id.to_string();
         let plugin_id = plugin_id.to_string();
-        let cx = HandlerContext::__new(
-            event,
-            adapter,
-            ctx,
-            Arc::clone(&telemetry),
-            self.plugin_state.clone(),
-        );
 
         tokio::spawn(async move {
             let _permit = permit;
             let started = std::time::Instant::now();
-            let result = tokio::time::timeout(handler_timeout, func(cx)).await;
+            let result = tokio::time::timeout(handler_timeout, future).await;
             match result {
                 Ok(Ok(())) => {
                     telemetry
@@ -288,6 +274,50 @@ impl PluginActor {
                 }
             }
         });
+    }
+
+    /// Try to acquire a permit or enqueue the task per the queue strategy.
+    pub(crate) async fn dispatch_or_enqueue(
+        &self,
+        handler: &MessageHandler,
+        plugin_id: &str,
+        event: MessageEvent,
+        adapter: Arc<dyn BaseAdapter>,
+        ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
+    ) {
+        let future = (handler.func.clone())(HandlerContext::__new(
+            event,
+            adapter,
+            ctx,
+            Arc::clone(&telemetry),
+            self.plugin_state.clone(),
+        ));
+        self.dispatch_task_or_enqueue(
+            &handler.id,
+            handler.timeout,
+            plugin_id,
+            future,
+            telemetry,
+        )
+        .await;
+    }
+
+    pub(crate) async fn dispatch_event_or_enqueue(
+        &self,
+        handler_id: &str,
+        plugin_id: &str,
+        future: TaskFuture,
+        telemetry: Arc<Telemetry>,
+    ) {
+        self.dispatch_task_or_enqueue(
+            handler_id,
+            self.default_timeout,
+            plugin_id,
+            future,
+            telemetry,
+        )
+        .await;
     }
 }
 
@@ -349,10 +379,9 @@ pub(crate) mod tests {
                 RouteHint::Exact(vec!["/ping".into()]),
                 Some(is_fullmatch(["/ping"])),
                 Arc::new(|cx: HandlerContext| {
-                    let event = cx.event;
-                    let reply = event.plain_text();
+                    let reply = cx.event.plain_text();
                     Box::pin(async move {
-                        let _ = event.reply(MessageSegment::text(reply)).await;
+                        let _ = cx.reply(MessageSegment::text(reply)).await;
                         Ok(())
                     })
                 }),
@@ -419,12 +448,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("/ping");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("/ping"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -476,12 +502,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("/pong");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("/pong"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -522,12 +545,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("anything");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("anything"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -568,12 +588,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("anything");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("anything"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -656,12 +673,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("test");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("test"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -715,12 +729,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("/skip");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("/skip"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -786,12 +797,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("check");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("check"),
                 adapter: Arc::new(MockAdapter),
                 ctx,
                 handler_id: None,
@@ -829,12 +837,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("anything");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("anything"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -918,12 +923,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("/ping");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("/ping"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -969,12 +971,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("test");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("test"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,
@@ -1024,11 +1023,9 @@ pub(crate) mod tests {
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
         for _ in 0..3 {
-            let mut event = make_event("test");
-            event.set_callback(|_| Box::pin(async {}));
             let _ = actor_ref
                 .tell(HandleEvent {
-                    event,
+                    event: make_event("test"),
                     adapter: Arc::new(MockAdapter),
                     ctx: Arc::new(Ctx::new()),
                     handler_id: None,
@@ -1076,12 +1073,9 @@ pub(crate) mod tests {
         });
         let actor_ref = PluginActor::spawn(PluginActor::new(plugin));
 
-        let mut event = make_event("test");
-        event.set_callback(|_| Box::pin(async {}));
-
         let _ = actor_ref
             .tell(HandleEvent {
-                event,
+                event: make_event("test"),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: None,

@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +18,7 @@ use crate::{
 ///     .author("me")
 ///     .command("ping", "/ping", Arc::new(|cx: HandlerContext| {
 ///         Box::pin(async move {
-///             cx.event.reply(MessageSegment::text("pong!")).await;
+///             cx.reply(MessageSegment::text("pong!")).await?;
 ///             Ok(())
 ///         })
 ///     }))
@@ -30,12 +29,12 @@ use crate::{
 pub struct PluginBuilder {
     metadata: PluginMetadata,
     message_handlers: Vec<MessageHandler>,
-    event_handlers: HashMap<String, Vec<EventHandler>>,
+    event_handlers: Vec<EventHandler>,
     default_timeout: Duration,
     capabilities: Vec<Capability>,
     concurrency: usize,
     queue_strategy: QueueStrategy,
-    plugin_initial_state: Option<Arc<dyn Any + Send + Sync>>,
+    plugin_initial_state: Option<crate::PluginState>,
 }
 
 impl PluginBuilder {
@@ -48,7 +47,7 @@ impl PluginBuilder {
                 ..Default::default()
             },
             message_handlers: Vec::new(),
-            event_handlers: HashMap::new(),
+            event_handlers: Vec::new(),
             default_timeout: Duration::from_secs(5),
             capabilities: Vec::new(),
             concurrency: 64,
@@ -172,9 +171,8 @@ impl PluginBuilder {
         handler_id: impl Into<String>,
         func: EventHandlerFunc,
     ) -> Self {
-        let et = event_type.into();
-        let handler = EventHandler::new(handler_id.into(), func);
-        self.event_handlers.entry(et).or_default().push(handler);
+        self.event_handlers
+            .push(EventHandler::new(event_type, handler_id, func));
         self
     }
 
@@ -200,10 +198,10 @@ impl PluginBuilder {
 pub struct BuiltPlugin {
     metadata: PluginMetadata,
     message_handlers: Vec<MessageHandler>,
-    event_handlers: HashMap<String, Vec<EventHandler>>,
+    event_handlers: Vec<EventHandler>,
     capabilities: Vec<Capability>,
     runtime: RuntimeConfig,
-    plugin_initial_state: Option<Arc<dyn Any + Send + Sync>>,
+    plugin_initial_state: Option<crate::PluginState>,
 }
 
 impl Plugin for BuiltPlugin {
@@ -215,8 +213,8 @@ impl Plugin for BuiltPlugin {
         &self.message_handlers
     }
 
-    fn event_handlers(&self) -> HashMap<String, Vec<EventHandler>> {
-        self.event_handlers.clone()
+    fn event_handlers(&self) -> &[EventHandler] {
+        &self.event_handlers
     }
 
     fn capabilities(&self) -> &[Capability] {
@@ -227,7 +225,7 @@ impl Plugin for BuiltPlugin {
         self.runtime.clone()
     }
 
-    fn __initial_state(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+    fn initial_state(&self) -> Option<crate::PluginState> {
         self.plugin_initial_state.clone()
     }
 }
@@ -267,7 +265,7 @@ mod tests {
 
         let handlers = plugin.event_handlers();
         assert_eq!(handlers.len(), 1);
-        assert!(handlers.contains_key("order_create"));
+        assert_eq!(handlers[0].event_type, "order_create");
     }
 
     #[test]
@@ -356,14 +354,13 @@ mod tests {
         // Test the handler directly
         use fish_core::event::MessageEvent;
         use fish_core::message::MessageChain;
-        let mut event = MessageEvent::new(
+        let event = MessageEvent::new(
             "cid".into(),
             "uid".into(),
             "name".into(),
             MessageChain::from("/echo"),
             serde_json::json!({}),
         );
-        event.set_callback(|_| Box::pin(async {}));
 
         let adapter: Arc<dyn crate::BaseAdapter> = Arc::new(TestAdapter);
         let ctx = Arc::new(fish_core::ctx::Ctx::new());
@@ -390,7 +387,7 @@ mod tests {
             .state(42usize)
             .build();
 
-        let state_arc = plugin.__initial_state().unwrap();
+        let state_arc = plugin.initial_state().unwrap();
         let lock = state_arc.downcast_ref::<RwLock<usize>>().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let value = rt.block_on(async { *lock.read().await });

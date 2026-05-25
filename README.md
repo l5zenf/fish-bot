@@ -19,7 +19,7 @@
 crates/
   fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
   fish-runtime        运行时编排：RuntimeHost / Bot / PluginActor / PluginBuilder / 默认 Fish 适配器
-  fish-plugin-macros  #[plugin] / #[plugin_handlers]
+  fish-plugin-macros  #[plugin] / #[message] / #[event]
 
 examples/
   quickstart          离线最小可运行示例
@@ -111,16 +111,14 @@ cargo run -p fish-example-fish-app
 use std::sync::Arc;
 
 use fish_runtime::prelude::*;
-use fish_runtime::{FishWebSocketAdapter, RuntimeHost};
+use fish_runtime::{plugin, FishWebSocketAdapter, RuntimeHost};
 
-#[plugin(id = "echo", name = "Echo")]
-#[derive(Default)]
 struct EchoPlugin;
 
-#[plugin_handlers]
+#[plugin]
 impl EchoPlugin {
-    #[command("/ping")]
-    async fn ping(&self, ctx: Context) -> Result<()> {
+    #[message("/ping")]
+    async fn ping(&self, ctx: MessageContext) -> Result<()> {
         ctx.reply("pong").await?;
         Ok(())
     }
@@ -144,7 +142,7 @@ use fish_runtime::prelude::*;
 use fish_runtime::RuntimeHost;
 
 let adapter: Arc<dyn BaseAdapter> = Arc::new(MyAdapter::new());
-let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(MyPlugin::default())];
+let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(MyPlugin::new())];
 
 let ctx = Arc::new(Ctx::new());
 ctx.insert(MyDatabasePool::new());
@@ -197,37 +195,35 @@ impl BaseAdapter for MyAdapter {
 
 ## 写插件
 
-推荐的插件开发方式是 `#[plugin] + #[plugin_handlers]`：
+推荐的插件开发方式是 `struct + #[plugin] impl`：
 
 ```rust
 use fish_runtime::prelude::*;
-use fish_runtime::{plugin, plugin_handlers};
+use fish_runtime::plugin;
 
-#[plugin(id = "greeter", name = "Greeter")]
-#[derive(Default)]
 struct Greeter {
     count: u64,
 }
 
-#[plugin_handlers]
+#[plugin(Self { count: 0 })]
 impl Greeter {
-    #[command("/ping")]
-    async fn ping(&self, ctx: Context) -> Result<()> {
+    #[message("/ping")]
+    async fn ping(&self, ctx: MessageContext) -> Result<()> {
         ctx.reply("pong").await?;
         Ok(())
     }
 
     #[message(keyword = "fish")]
-    async fn on_keyword(&mut self, ctx: Context) -> Result<()> {
+    async fn on_keyword(&mut self, ctx: MessageContext) -> Result<()> {
         self.count += 1;
-        ctx.reply(format!("keyword hit: {}, count={}", ctx.text()?, self.count))
+        ctx.reply(format!("keyword hit: {}, count={}", ctx.text(), self.count))
             .await?;
         Ok(())
     }
 
     #[event("order_create")]
-    async fn on_order(&self, ctx: Context) -> Result<()> {
-        tracing::info!("event={}, payload={}", ctx.event_type()?, ctx.payload()?);
+    async fn on_order(&self, ctx: EventContext) -> Result<()> {
+        tracing::info!("event={}, payload={}", ctx.event_type(), ctx.payload());
         Ok(())
     }
 }
@@ -235,21 +231,16 @@ impl Greeter {
 
 ### Handler 签名语义
 
-插件状态和并发语义直接由 receiver 表达：
+宏模式现在只保留**状态化插件**这一条路，handler 必须使用 receiver：
 
 ```rust
-#[command("/stat")]
-async fn stat(ctx: Context) -> Result<()> { ... }
+#[message("/read")]
+async fn read(&self, ctx: MessageContext) -> Result<()> { ... }
 
-#[command("/read")]
-async fn read(&self, ctx: Context) -> Result<()> { ... }
-
-#[command("/write")]
-async fn write(&mut self, ctx: Context) -> Result<()> { ... }
+#[message("/write")]
+async fn write(&mut self, ctx: MessageContext) -> Result<()> { ... }
 ```
 
-- 无 receiver
-  - 适合无状态 handler
 - `&self`
   - 读状态
   - 允许并发执行
@@ -257,46 +248,63 @@ async fn write(&mut self, ctx: Context) -> Result<()> { ... }
   - 写状态
   - 在单插件 actor 内串行化
 
+如果你想写无状态、纯 actor 心智模型的 handler，不走宏，直接使用 `PluginBuilder`。
+
 这也是当前推荐的“功能内聚，一个插件 struct 承载自己的状态和行为”的用法。
+
+另外，插件声明现在分成两层：
+
+- `#[plugin] impl Type`
+  - 挂在插件的 `impl` 上
+  - 负责状态初始化和 handler 注册
+  - `name` 默认等于 struct 名
+  - `id` 默认等于 struct 名的 snake_case
+  - 对 unit struct 默认使用 `Self` 初始化
+  - 有状态 struct 时直接写 Rust 表达式，例如 `#[plugin(Self { count: 0 })]`
 
 ### 路由方式
 
 ```rust
-#[command("/ping")]
-#[command("/admin", kind = "prefix")]
-#[command(pattern = r"^\d+$", kind = "regex")]
-#[command(fallback)]
+#[message("/ping")]
+#[message("/admin", kind = "prefix")]
+#[message(pattern = r"^\d+$", kind = "regex")]
+#[message(fallback)]
 
 #[message(keyword = "最低多少钱")]
 #[event("order_create")]
 ```
 
+消息侧现在推荐只记一个属性：`#[message(...)]`。  
+`command` 仍可作为兼容别名使用，但不再是推荐 API。
+
+推荐写法：
+
+- 精确匹配：`#[message("/ping")]`
+- 关键词匹配：`#[message(keyword = "你好")]`
+- 前缀匹配：`#[message("/admin", kind = "prefix")]`
+- 正则匹配：`#[message(pattern = r"^\\d+$", kind = "regex")]`
+- 兜底：`#[message(fallback)]`
+
 `RuntimeHost` 启动后，`Bot` 会根据 `RouteHint` 建索引，尽量把事件只派发给可能命中的插件。
 
 ## Context API
 
-`Context` 对插件作者暴露统一的调用面。
+现在对插件作者暴露的是两个明确上下文，而不是一个“双语义 Context”：
 
-消息 handler 中常用：
+- `MessageContext`
+  - 用在 `#[message]`
+  - 常用方法：`reply(...)`、`text()`、`sender_id()`、`cid()`、`event()`
+- `EventContext`
+  - 用在 `#[event]`
+  - 常用方法：`event_type()`、`payload()`、`event()`
 
-- `ctx.reply("hello").await?`
-- `ctx.text()?`
-- `ctx.sender_id()?`
-- `ctx.cid()?`
-- `ctx.event()?`
+两个上下文都提供：
 
-系统事件 handler 中常用：
+- `adapter()`
+- `app_ctx()`
+- `telemetry()`
 
-- `ctx.event_type()?`
-- `ctx.payload()?`
-
-所有 handler 中都可用：
-
-- `ctx.adapter()`
-- `ctx.app_ctx()`
-- `ctx.telemetry()`
-
-`Context` 会根据当前上下文类型做约束。比如在 `#[event]` handler 里调用 `ctx.reply()` 会返回错误，而不是 panic。
+这样插件作者不需要再记“哪些方法只有在某种上下文里才能调用”，类型本身就表达了能力边界。
 
 ## 状态模型
 
@@ -307,16 +315,14 @@ async fn write(&mut self, ctx: Context) -> Result<()> { ... }
 这是默认推荐方式，最符合“高内聚”：
 
 ```rust
-#[plugin(id = "counter", name = "Counter")]
-#[derive(Default)]
 struct Counter {
     value: u64,
 }
 
-#[plugin_handlers]
+#[plugin(Self { value: 0 })]
 impl Counter {
-    #[command("/incr")]
-    async fn incr(&mut self, ctx: Context) -> Result<()> {
+    #[message("/incr")]
+    async fn incr(&mut self, ctx: MessageContext) -> Result<()> {
         self.value += 1;
         ctx.reply(format!("value={}", self.value)).await?;
         Ok(())
@@ -340,9 +346,7 @@ let plugin = PluginBuilder::new("counter", "Counter")
             let state = cx.state::<u64>()?;
             let mut value = state.write().await;
             *value += 1;
-            cx.event
-                .reply(MessageSegment::text(format!("value={}", *value)))
-                .await;
+            cx.reply(format!("value={}", *value)).await?;
             Ok(())
         })
     }))
@@ -375,7 +379,7 @@ let plugin = PluginBuilder::new("echo", "Echo")
     .queue_strategy(QueueStrategy::DropOldest(128))
     .command("ping", "/ping", Arc::new(|cx: HandlerContext| {
         Box::pin(async move {
-            cx.event.reply(MessageSegment::text("pong")).await;
+            cx.reply("pong").await?;
             Ok(())
         })
     }))

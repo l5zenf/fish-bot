@@ -1,39 +1,22 @@
 use std::sync::Arc;
 
 use fish_core::ctx::Ctx;
-use fish_core::error::{AppError, Result};
+use fish_core::error::Result;
 use fish_core::event::{MessageEvent, SystemEvent};
-use fish_core::message::MessageSegment;
+use fish_core::message::MessageChain;
 use fish_core::telemetry::Telemetry;
 
 use crate::BaseAdapter;
 
-/// Context passed to plugin handlers.
-///
-/// Can represent either a message handler context (`#[command]`, `#[message]`)
-/// or a system event handler context (`#[event]`). Some methods are only
-/// available in one variant and return `Err` in the other.
-pub struct Context {
-    pub(crate) inner: ContextInner,
+/// Plugin-facing message context for `#[message]` handlers.
+pub struct MessageContext {
+    event: MessageEvent,
+    adapter: Arc<dyn BaseAdapter>,
+    app_ctx: Arc<Ctx>,
+    telemetry: Arc<Telemetry>,
 }
 
-pub(crate) enum ContextInner {
-    Message {
-        event: MessageEvent,
-        adapter: Arc<dyn BaseAdapter>,
-        app_ctx: Arc<Ctx>,
-        telemetry: Arc<Telemetry>,
-    },
-    System {
-        event: Arc<SystemEvent>,
-        adapter: Arc<dyn BaseAdapter>,
-        app_ctx: Arc<Ctx>,
-        telemetry: Arc<Telemetry>,
-    },
-}
-
-impl Context {
-    /// Create from a `HandlerContext` (message handlers).
+impl MessageContext {
     pub fn new(
         event: MessageEvent,
         adapter: Arc<dyn BaseAdapter>,
@@ -41,131 +24,159 @@ impl Context {
         telemetry: Arc<Telemetry>,
     ) -> Self {
         Self {
-            inner: ContextInner::Message {
-                event,
-                adapter,
-                app_ctx,
-                telemetry,
-            },
+            event,
+            adapter,
+            app_ctx,
+            telemetry,
         }
     }
 
-    /// Create from a system event (event handlers).
-    pub fn new_from_event(
+    pub async fn reply(&self, message: impl Into<MessageChain>) -> Result<()> {
+        let message = message.into();
+        if let Err(err) = self
+            .adapter
+            .send(&self.event.sender_id, &message, Some(&self.event.cid))
+            .await
+        {
+            self.telemetry
+                .reply_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn sender_id(&self) -> &str {
+        &self.event.sender_id
+    }
+
+    pub fn cid(&self) -> &str {
+        &self.event.cid
+    }
+
+    pub fn text(&self) -> String {
+        self.event.plain_text()
+    }
+
+    pub fn event(&self) -> &MessageEvent {
+        &self.event
+    }
+
+    pub fn adapter(&self) -> &Arc<dyn BaseAdapter> {
+        &self.adapter
+    }
+
+    pub fn app_ctx(&self) -> &Arc<Ctx> {
+        &self.app_ctx
+    }
+
+    pub fn telemetry(&self) -> &Arc<Telemetry> {
+        &self.telemetry
+    }
+}
+
+/// Plugin-facing event context for `#[event]` handlers.
+pub struct EventContext {
+    event: Arc<SystemEvent>,
+    adapter: Arc<dyn BaseAdapter>,
+    app_ctx: Arc<Ctx>,
+    telemetry: Arc<Telemetry>,
+}
+
+impl EventContext {
+    pub fn new(
         event: Arc<SystemEvent>,
         adapter: Arc<dyn BaseAdapter>,
         app_ctx: Arc<Ctx>,
+        telemetry: Arc<Telemetry>,
     ) -> Self {
         Self {
-            inner: ContextInner::System {
-                event,
-                adapter,
-                app_ctx,
-                telemetry: Arc::new(Telemetry::new()),
-            },
+            event,
+            adapter,
+            app_ctx,
+            telemetry,
         }
     }
 
-    // -- Message-only methods --
-
-    /// Reply with a text message. Available only in message handler context.
-    pub async fn reply(&self, text: impl Into<String>) -> Result<()> {
-        match &self.inner {
-            ContextInner::Message { event, .. } => {
-                event.reply(MessageSegment::text(text.into())).await;
-                Ok(())
-            }
-            ContextInner::System { .. } => Err(AppError::internal(
-                "reply is not available in event handler context",
-            )),
-        }
+    pub fn event_type(&self) -> &str {
+        &self.event.event_type
     }
 
-    /// The sender's user ID. Available only in message handler context.
-    pub fn sender_id(&self) -> Result<&str> {
-        match &self.inner {
-            ContextInner::Message { event, .. } => Ok(&event.sender_id),
-            ContextInner::System { .. } => Err(AppError::internal(
-                "sender_id is not available in event handler context",
-            )),
-        }
+    pub fn payload(&self) -> &serde_json::Value {
+        &self.event.payload
     }
 
-    /// The conversation / channel ID. Available only in message handler context.
-    pub fn cid(&self) -> Result<&str> {
-        match &self.inner {
-            ContextInner::Message { event, .. } => Ok(&event.cid),
-            ContextInner::System { .. } => Err(AppError::internal(
-                "cid is not available in event handler context",
-            )),
-        }
+    pub fn event(&self) -> &SystemEvent {
+        &self.event
     }
 
-    /// The plain text content of the message. Available only in message handler context.
-    pub fn text(&self) -> Result<String> {
-        match &self.inner {
-            ContextInner::Message { event, .. } => Ok(event.plain_text()),
-            ContextInner::System { .. } => Err(AppError::internal(
-                "text is not available in event handler context",
-            )),
-        }
-    }
-
-    /// The raw message event. Available only in message handler context.
-    pub fn event(&self) -> Result<&MessageEvent> {
-        match &self.inner {
-            ContextInner::Message { event, .. } => Ok(event),
-            ContextInner::System { .. } => Err(AppError::internal(
-                "event is only available in message handler context",
-            )),
-        }
-    }
-
-    // -- System-only methods --
-
-    /// The system event type (e.g. "order_create"). Available only in event handler context.
-    pub fn event_type(&self) -> Result<&str> {
-        match &self.inner {
-            ContextInner::Message { .. } => Err(AppError::internal(
-                "event_type is only available in event handler context",
-            )),
-            ContextInner::System { event, .. } => Ok(&event.event_type),
-        }
-    }
-
-    /// The raw system event payload. Available only in event handler context.
-    pub fn payload(&self) -> Result<&serde_json::Value> {
-        match &self.inner {
-            ContextInner::Message { .. } => Err(AppError::internal(
-                "payload is only available in event handler context",
-            )),
-            ContextInner::System { event, .. } => Ok(&event.payload),
-        }
-    }
-
-    // -- Common methods --
-
-    /// Access the adapter for sending messages.
     pub fn adapter(&self) -> &Arc<dyn BaseAdapter> {
-        match &self.inner {
-            ContextInner::Message { adapter, .. } => adapter,
-            ContextInner::System { adapter, .. } => adapter,
-        }
+        &self.adapter
     }
 
-    /// Access the shared application context.
     pub fn app_ctx(&self) -> &Arc<Ctx> {
-        match &self.inner {
-            ContextInner::Message { app_ctx, .. } => app_ctx,
-            ContextInner::System { app_ctx, .. } => app_ctx,
+        &self.app_ctx
+    }
+
+    pub fn telemetry(&self) -> &Arc<Telemetry> {
+        &self.telemetry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use fish_core::AdapterEventSink;
+
+    struct RecordAdapter {
+        sent: Arc<tokio::sync::Mutex<Vec<(String, Option<String>, String)>>>,
+    }
+
+    #[async_trait]
+    impl BaseAdapter for RecordAdapter {
+        async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
+            self.sent.lock().await.push((
+                target_id.to_string(),
+                cid.map(str::to_string),
+                message.summary(),
+            ));
+            Ok(())
+        }
+
+        async fn run(&self, _sink: Arc<dyn AdapterEventSink>) -> Result<()> {
+            Ok(())
         }
     }
 
-    /// Access telemetry counters.
-    pub fn telemetry(&self) -> &Arc<Telemetry> {
-        match &self.inner {
-            ContextInner::Message { telemetry, .. } => telemetry,
-            ContextInner::System { telemetry, .. } => telemetry,
-        }
+    #[tokio::test]
+    async fn t3_1_message_context_reply_uses_adapter_send() -> Result<()> {
+        let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn BaseAdapter> = Arc::new(RecordAdapter {
+            sent: Arc::clone(&sent),
+        });
+        let ctx = MessageContext::new(
+            MessageEvent::new(
+                "demo-cid".into(),
+                "demo-user".into(),
+                "Demo User".into(),
+                MessageChain::from("/ping"),
+                serde_json::json!({}),
+            ),
+            adapter,
+            Arc::new(Ctx::new()),
+            Arc::new(Telemetry::new()),
+        );
+
+        ctx.reply("pong").await?;
+
+        let guard = sent.lock().await;
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].0, "demo-user");
+        assert_eq!(guard[0].1.as_deref(), Some("demo-cid"));
+        assert_eq!(guard[0].2, "pong");
+        Ok(())
     }
 }
