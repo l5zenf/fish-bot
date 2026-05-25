@@ -2,7 +2,7 @@
 
 ![](./assets/bkg.png)
 
-`fish-bot` 是一个围绕闲鱼消息场景构建的 Rust 插件运行时。
+`fish-bot` 是一个围绕 fish 消息场景构建的 Rust 插件运行时。
 
 仓库拆成四层：
 
@@ -11,11 +11,11 @@
 - `fish-runtime`
   负责运行时编排：加载插件、分发消息、管理上下文和 telemetry。
 - `fish-rt-adapter`
-  提供默认的闲鱼适配器 `FishWebSocketAdapter`，包含 Cookie 导入、MTOP token 获取、WebSocket 建连和协议处理。
+  提供默认的 fish 适配器 `FishWebSocketAdapter`，包含 Cookie 导入、MTOP token 获取、WebSocket 建连和协议处理。
 - `fish-plugin-macros`
   提供 `#[plugin]`、`#[message]`、`#[event]` 这套插件声明宏。
 
-如果你只想用现成的闲鱼运行时，直接用 `fish-rt-adapter`。
+如果你只想用现成的 fish 运行时，直接用 `fish-rt-adapter`。
 如果你想把运行时接到别的平台，实现 `BaseAdapter` 就够了。
 
 ## 现在仓库里有什么
@@ -66,28 +66,7 @@ BaseAdapter
 - `Plugin`
   负责业务处理。
 
-这意味着宿主不需要知道闲鱼协议细节，也不需要知道运行时内部的调度实现。
-
-## 当前闲鱼协议实现范围
-
-`fish-rt-adapter` 当前聚焦的是闲鱼 PC Web 消息通道：
-
-- 浏览器 Cookie 导入
-- MTOP token 获取
-- WebSocket 建连
-- `/reg` 注册
-- `/r/SyncStatus/ackDiff`
-- 通用 ACK
-- 心跳 `/!`
-- `syncPushPackage` 解包
-- `sendByReceiverScope` 发送文本消息
-
-当前协议层有两个重要约束：
-
-- 出站消息只实现了 Python 参考协议同款的**纯文本发送**
-- 入站消息按参考实现，只处理 `syncPushPackage.data[0]`
-
-如果你准备扩展图片、卡片或更多闲鱼业务类型，应该把它当成新增协议能力，而不是 README 里已经承诺支持的现成功能。
+这意味着宿主不需要知道 fish 协议细节，也不需要知道运行时内部的调度实现。
 
 ## 快速开始
 
@@ -253,7 +232,7 @@ impl Message<Ping> for CounterActor {
 
 ## 自定义 adapter
 
-如果你不想用闲鱼 adapter，只要实现 `BaseAdapter`：
+如果你不想用 fish adapter，只要实现 `BaseAdapter`：
 
 ```rust
 use async_trait::async_trait;
@@ -314,7 +293,7 @@ use fish_rt_adapter::{FishWebSocketAdapter, RuntimeHost, Telemetry, plugin};
 cargo test
 ```
 
-只跑闲鱼 adapter：
+只跑 fish adapter：
 
 ```bash
 cargo test -p fish-rt-adapter -- --nocapture
@@ -330,8 +309,8 @@ cargo test --test fish_rt_adapter_api_test -- --nocapture
 
 这个仓库适合两类人：
 
-- 想快速做一个闲鱼消息机器人，但不想把协议、调度和业务逻辑揉在一起的人
-- 想复用消息运行时，只把闲鱼 adapter 当成默认实现的人
+- 想快速做一个 fish 消息机器人，但不想把协议、调度和业务逻辑揉在一起的人
+- 想复用消息运行时，只把 fish adapter 当成默认实现的人
 
-如果你要的是“一个完整的闲鱼自动交易系统”，这里还不是成品。
+如果你要的是“一个完整的 fish 自动交易系统”，这里还不是成品。
 如果你要的是“一个边界清晰、能继续扩展的运行时底座”，这个仓库就是干这个的。
