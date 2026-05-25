@@ -1,6 +1,5 @@
 use fish_rt_adapter::FishWebSocketAdapter as AdapterFishWebSocketAdapter;
 use fish_rt_adapter::RuntimeHost;
-use fish_rt_adapter::parse_browser_cookie_header;
 use fish_rt_adapter::plugin;
 use fish_rt_adapter::prelude::*;
 use std::fs;
@@ -23,13 +22,6 @@ fn examples_default_to_fish_websocket_adapter() {
     assert!(custom.contains("FishWebSocketAdapter"));
     assert!(!simple.contains("LocalAdapter"));
     assert!(!custom.contains("LocalAdapter"));
-}
-
-#[test]
-fn browser_cookie_parser_is_available_from_adapter_facade() {
-    let parsed = parse_browser_cookie_header("cookie2=abc; unb=123");
-    assert_eq!(parsed.get("cookie2"), Some(&"abc".to_string()));
-    assert_eq!(parsed.get("unb"), Some(&"123".to_string()));
 }
 
 #[test]

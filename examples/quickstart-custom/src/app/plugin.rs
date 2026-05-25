@@ -2,6 +2,7 @@ use fish_rt_adapter::ActorPluginBuilder;
 use fish_rt_adapter::prelude::*;
 use kameo::Actor;
 use kameo::message::{Context, Message};
+use tracing::info;
 
 #[derive(Actor)]
 pub(crate) struct CounterActor {
@@ -24,6 +25,7 @@ impl Message<Ping> for CounterActor {
     type Reply = Result<()>;
 
     async fn handle(&mut self, msg: Ping, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        info!("receive message");
         self.seen += 1;
         msg.0.reply(format!("actor pong #{}", self.seen)).await
     }

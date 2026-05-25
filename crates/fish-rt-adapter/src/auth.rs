@@ -10,7 +10,14 @@ pub struct CookieImportReport {
     pub path: PathBuf,
 }
 
-pub fn parse_browser_cookie_header(raw: &str) -> HashMap<String, String> {
+fn is_cookie_attribute(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "max-age" | "expires" | "path" | "domain" | "samesite" | "secure" | "httponly"
+    )
+}
+
+fn parse_browser_cookie_header(raw: &str) -> HashMap<String, String> {
     raw.split(';')
         .filter_map(|entry| {
             let trimmed = entry.trim();
@@ -20,7 +27,7 @@ pub fn parse_browser_cookie_header(raw: &str) -> HashMap<String, String> {
 
             let (name, value) = trimmed.split_once('=')?;
             let name = name.trim();
-            if name.is_empty() {
+            if name.is_empty() || is_cookie_attribute(name) {
                 return None;
             }
 
@@ -538,7 +545,7 @@ mod tests {
     #[test]
     fn t3_64_parse_browser_cookie_header() {
         let cookies = parse_browser_cookie_header(
-            "cookie2=abc; _m_h5_tk=token_123; sgcookie=E100%2Btest; invalid-entry ; tracknick=nick=name",
+            "cookie2=abc; _m_h5_tk=token_123; sgcookie=E100%2Btest; invalid-entry ; tracknick=nick=name; Max-Age=1773; Expires=Mon, 25-May-2026 11:06:55 GMT",
         );
 
         assert_eq!(cookies.get("cookie2"), Some(&"abc".to_string()));
@@ -546,6 +553,8 @@ mod tests {
         assert_eq!(cookies.get("sgcookie"), Some(&"E100%2Btest".to_string()));
         assert_eq!(cookies.get("tracknick"), Some(&"nick=name".to_string()));
         assert!(!cookies.contains_key("invalid-entry"));
+        assert!(!cookies.contains_key("Max-Age"));
+        assert!(!cookies.contains_key("Expires"));
     }
 
     #[tokio::test]

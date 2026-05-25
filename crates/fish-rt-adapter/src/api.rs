@@ -131,6 +131,10 @@ impl FishAPI {
         self.auth.my_id().await
     }
 
+    pub(crate) async fn cookie_header(&self) -> String {
+        self.auth.cookie_header().await
+    }
+
     // ---- Core MTOP call ----
 
     /// Make an MTOP API call with full sign and cookie handling.
