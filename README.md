@@ -2,117 +2,162 @@
 
 ![](./assets/bkg.png)
 
-一个围绕闲鱼消息场景构建的 Rust 插件运行时。
+`fish-bot` 是一个围绕闲鱼消息场景构建的 Rust 插件运行时。
 
-现在的设计目标很明确：
+仓库拆成四层：
 
-- `fish-core` 定义稳定抽象和通用模型
-- `fish-runtime` 提供运行时编排能力
-- `fish-rt-adapter` 提供默认的闲鱼 runtime 适配实现
-- `fish-plugin-macros` 提供插件声明宏
-- 宿主只是组装 `adapter + plugins + context`，不和运行时内部实现耦合
+- `fish-core`
+  定义稳定抽象：`BaseAdapter`、`AdapterEventSink`、消息模型、事件模型、规则、共享上下文。
+- `fish-runtime`
+  负责运行时编排：加载插件、分发消息、管理上下文和 telemetry。
+- `fish-rt-adapter`
+  提供默认的闲鱼适配器 `FishWebSocketAdapter`，包含 Cookie 导入、MTOP token 获取、WebSocket 建连和协议处理。
+- `fish-plugin-macros`
+  提供 `#[plugin]`、`#[message]`、`#[event]` 这套插件声明宏。
 
-这意味着你可以把 `fish-runtime` 嵌进任何宿主里使用，不管入口是 CLI、`axum`、`pyo3`，还是你自己的进程管理框架。仓库里的 example 只是接线示例，不是唯一使用方式。
+如果你只想用现成的闲鱼运行时，直接用 `fish-rt-adapter`。
+如果你想把运行时接到别的平台，实现 `BaseAdapter` 就够了。
 
-## 当前结构
+## 现在仓库里有什么
 
 ```text
 crates/
-  fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
-  fish-runtime        运行时编排：RuntimeHost / PluginActor / ActorPluginBuilder
-  fish-rt-adapter     默认闲鱼适配实现：FishWebSocketAdapter
-  fish-plugin-macros  #[plugin] / #[message] / #[event]
+  fish-core
+  fish-runtime
+  fish-rt-adapter
+  fish-plugin-macros
 
 examples/
-  quickstart-simple   基于宏的 FishWebSocketAdapter 插件示例
-  quickstart-custom   基于 actor 的 FishWebSocketAdapter 插件示例
+  quickstart-simple   宏插件示例
+  quickstart-custom   actor-first 插件示例
+
+tests/
+  adapter_test.rs
+  protocol_test.rs
+  model_test.rs
+  fish_rt_adapter_api_test.rs
 ```
 
 依赖方向保持单向：
 
 ```text
 fish-runtime -> fish-core
-fish-rt-adapter -> fish-core
+fish-rt-adapter -> fish-core + fish-runtime
 fish-plugin-macros -> fish-runtime
 ```
 
-## 核心心智模型
+## 核心模型
 
-运行时只做一件事：把外部平台事件安全、可控地分发给插件。
+运行时的职责很简单：把外部平台消息交给插件。
 
 ```text
 BaseAdapter
   -> RuntimeHost
-     -> PluginActor
+     -> Plugin
         -> handler
 ```
 
-职责划分：
+边界也很明确：
 
 - `BaseAdapter`
-  - 负责接入外部平台
-  - 把消息事件和系统事件推给 runtime
-  - 提供发送消息能力
+  负责接入外部平台，以及发送消息。
 - `RuntimeHost`
-  - 负责把 adapter、plugins、共享上下文组装起来
-  - 负责基于 `RouteHint` 做消息预路由
-  - 作为标准启动入口
-- `PluginActor`
-  - 为单个插件隔离状态、并发和超时控制
-  - 执行真正的 handler
+  负责把 adapter、plugins、`Ctx`、`Telemetry` 组装起来并启动。
+- `Plugin`
+  负责业务处理。
 
-这个边界的重点是：宿主只依赖 trait 和公开 API，不需要知道 runtime 内部怎么调度。
+这意味着宿主不需要知道闲鱼协议细节，也不需要知道运行时内部的调度实现。
 
-## 为什么用 actor
+## 当前闲鱼协议实现范围
 
-聊天类业务天然是高并发、多会话、慢操作和快操作混在一起。actor 模型比较适合这个场景：
+`fish-rt-adapter` 当前聚焦的是闲鱼 PC Web 消息通道：
 
-- 插件状态天然隔离
-- 一个插件变慢不会拖垮其他插件
-- `&self` 和 `&mut self` handler 能自然表达并发语义
-- panic 和超时可以限制在单个插件 actor 内部
+- 浏览器 Cookie 导入
+- MTOP token 获取
+- WebSocket 建连
+- `/reg` 注册
+- `/r/SyncStatus/ackDiff`
+- 通用 ACK
+- 心跳 `/!`
+- `syncPushPackage` 解包
+- `sendByReceiverScope` 发送文本消息
 
-这比把所有插件都挂在一堆全局变量上更容易维护，也更容易替换宿主实现。
+当前协议层有两个重要约束：
+
+- 出站消息只实现了 Python 参考协议同款的**纯文本发送**
+- 入站消息按参考实现，只处理 `syncPushPackage.data[0]`
+
+如果你准备扩展图片、卡片或更多闲鱼业务类型，应该把它当成新增协议能力，而不是 README 里已经承诺支持的现成功能。
 
 ## 快速开始
 
-仓库里有两个 example 项目：
+先确认本机有 Rust 工具链：
 
-- `examples/quickstart-simple`
-  - 默认使用 `FishWebSocketAdapter`
-  - 演示 `#[plugin]` / `#[message]` 的宏插件开发方式
-- `examples/quickstart-custom`
-  - 默认使用 `FishWebSocketAdapter`
-  - 演示 `ActorPluginBuilder` 的 actor-first 插件开发方式
+```bash
+cargo --version
+```
 
-先跑宏插件例子：
+然后直接跑 example。
+
+宏插件版本：
 
 ```bash
 cargo run -p fish-example-quickstart-simple
 ```
 
-再跑 actor-first 例子：
+actor-first 版本：
 
 ```bash
 cargo run -p fish-example-quickstart-custom
 ```
 
-如果你已经从浏览器拿到了原始 `Cookie` 请求头，也可以直接导入并写入 `data/fish_auth.json`：
+如果你已经从浏览器拿到了完整 Cookie 请求头，可以在启动前导入：
 
 ```bash
 cargo run -p fish-example-quickstart-simple -- --cookies "cookie2=...; unb=...; _m_h5_tk=..."
 ```
 
-## 宿主如何启动 runtime
+或者：
 
-标准启动方式就是把插件列表和 adapter 交给 `RuntimeHost`：
+```bash
+cargo run -p fish-example-quickstart-custom -- --cookies "cookie2=...; unb=...; _m_h5_tk=..."
+```
+
+导入后会把可用 Cookie 持久化到 `data/fish_auth.json`。
+
+## Cookie 和认证文件
+
+仓库支持直接导入浏览器抓到的原始 `Cookie` header：
+
+```rust
+use fish_rt_adapter::import_browser_cookies;
+
+let report = import_browser_cookies(raw_cookie_header).await?;
+println!("imported {} cookies into {}", report.imported, report.path.display());
+```
+
+解析时会自动忽略浏览器附带的 Cookie 属性，例如：
+
+- `Max-Age`
+- `Expires`
+- `Path`
+- `Domain`
+- `SameSite`
+- `Secure`
+- `HttpOnly`
+
+默认的认证文件路径是 `data/fish_auth.json`。这个文件已经在 `.gitignore` 中忽略，不应该提交。
+
+## 最小宿主示例
+
+标准启动方式就是把 adapter 和 plugins 交给 `RuntimeHost`：
 
 ```rust
 use std::sync::Arc;
 
-use fish_rt_adapter::FishWebSocketAdapter;
-use fish_runtime::prelude::*;
-use fish_runtime::{plugin, RuntimeHost};
+use fish_rt_adapter::plugin;
+use fish_rt_adapter::prelude::*;
+use fish_rt_adapter::{BaseAdapter, FishWebSocketAdapter, RuntimeHost, Telemetry};
 
 struct EchoPlugin;
 
@@ -130,36 +175,85 @@ async fn main() -> Result<()> {
     let adapter: Arc<dyn BaseAdapter> = Arc::new(FishWebSocketAdapter::new());
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(EchoPlugin)];
 
-    RuntimeHost::with_plugins(adapter, plugins).run().await
+    let host = RuntimeHost::new(
+        adapter,
+        plugins,
+        Arc::new(Ctx::new()),
+        Arc::new(Telemetry::new()),
+    );
+
+    host.run().await
 }
 ```
 
-如果你需要注入自己的共享依赖，也可以显式构造：
+## 写插件
+
+### 1. 宏插件
+
+这是最直接的写法，也是 `examples/quickstart-simple` 使用的方式：
 
 ```rust
-use std::sync::Arc;
+use fish_rt_adapter::plugin;
+use fish_rt_adapter::prelude::*;
 
-use fish_runtime::prelude::*;
-use fish_runtime::RuntimeHost;
+pub struct EchoPlugin;
 
-let adapter: Arc<dyn BaseAdapter> = Arc::new(MyAdapter::new());
-let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(MyPlugin::new())];
+#[plugin]
+impl EchoPlugin {
+    #[message("/ping")]
+    async fn ping(&self, ctx: MessageContext) -> Result<()> {
+        ctx.reply("pong").await?;
+        Ok(())
+    }
 
-let ctx = Arc::new(Ctx::new());
-ctx.insert(MyDatabasePool::new());
-
-let telemetry = Arc::new(Telemetry::new());
-
-RuntimeHost::new(adapter, plugins, ctx, telemetry).run().await?;
+    #[message(keyword = "fish")]
+    async fn on_keyword(&self, ctx: MessageContext) -> Result<()> {
+        ctx.reply(format!("keyword hit: {}", ctx.text())).await?;
+        Ok(())
+    }
+}
 ```
 
-## 如果不用默认闲鱼实现
+### 2. Actor-first 插件
 
-默认闲鱼 adapter 现在位于 `fish-rt-adapter`，但 runtime 本身并不绑定闲鱼。
+如果你希望手工控制 actor 状态和邮箱，可以使用 `ActorPluginBuilder`。这是 `examples/quickstart-custom` 的方式：
 
-如果你还在旧代码里从 `fish-runtime` 直接拿 `FishWebSocketAdapter`，当前版本仍然保留了兼容 re-export；但新的推荐用法是直接依赖 `fish-rt-adapter`。
+```rust
+use fish_rt_adapter::ActorPluginBuilder;
+use fish_rt_adapter::prelude::*;
+use kameo::Actor;
+use kameo::message::{Context, Message};
 
-你只要实现 `fish-core::BaseAdapter`，就能把 runtime 接到任何外部系统上：
+#[derive(Actor)]
+struct CounterActor {
+    seen: u64,
+}
+
+fn build_plugin() -> ActorPluginBuilder<CounterActor> {
+    ActorPluginBuilder::new(|| CounterActor { seen: 0 })
+        .id("quickstart_custom_actor")
+        .name("QuickstartCustomActor")
+        .bounded_mailbox(64)
+        .on_message("/ping", Ping)
+        .on_keyword("runtime", KeywordHit)
+}
+
+struct Ping(MessageContext);
+struct KeywordHit(MessageContext);
+
+impl Message<Ping> for CounterActor {
+    type Reply = Result<()>;
+
+    async fn handle(&mut self, msg: Ping, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.seen += 1;
+        msg.0.reply(format!("actor pong #{}", self.seen)).await
+    }
+}
+```
+
+## 自定义 adapter
+
+如果你不想用闲鱼 adapter，只要实现 `BaseAdapter`：
 
 ```rust
 use async_trait::async_trait;
@@ -175,7 +269,7 @@ struct MyAdapter;
 #[async_trait]
 impl BaseAdapter for MyAdapter {
     async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
-        println!("send -> target={target_id}, cid={:?}, payload={}", cid, message.summary());
+        println!("send -> target={target_id}, cid={cid:?}, payload={}", message.summary());
         Ok(())
     }
 
@@ -194,284 +288,50 @@ impl BaseAdapter for MyAdapter {
 }
 ```
 
-这里的关键点不是“继承闲鱼实现”，而是“遵守稳定 trait 边界”。
+## 对外 API
 
-## 写插件
+`fish-rt-adapter` 当前对外导出的主要入口有：
 
-推荐的插件开发方式是 `struct + #[plugin] impl`：
+- `FishWebSocketAdapter`
+- `import_browser_cookies`
+- `RuntimeHost`
+- `ActorPluginBuilder`
+- `plugin`
+- `prelude::*`
 
-```rust
-use fish_runtime::prelude::*;
-use fish_runtime::plugin;
-
-struct Greeter {
-    count: u64,
-}
-
-#[plugin(Self { count: 0 })]
-impl Greeter {
-    #[message("/ping")]
-    async fn ping(&self, ctx: MessageContext) -> Result<()> {
-        ctx.reply("pong").await?;
-        Ok(())
-    }
-
-    #[message(keyword = "fish")]
-    async fn on_keyword(&mut self, ctx: MessageContext) -> Result<()> {
-        self.count += 1;
-        ctx.reply(format!("keyword hit: {}, count={}", ctx.text(), self.count))
-            .await?;
-        Ok(())
-    }
-
-    #[event("order_create")]
-    async fn on_order(&self, ctx: EventContext) -> Result<()> {
-        tracing::info!("event={}, payload={}", ctx.event_type(), ctx.payload());
-        Ok(())
-    }
-}
-```
-
-### Handler 签名语义
-
-宏模式现在只保留**状态化插件**这一条路，handler 必须使用 receiver：
+常见用法：
 
 ```rust
-#[message("/read")]
-async fn read(&self, ctx: MessageContext) -> Result<()> { ... }
-
-#[message("/write")]
-async fn write(&mut self, ctx: MessageContext) -> Result<()> { ... }
+use fish_rt_adapter::prelude::*;
+use fish_rt_adapter::{FishWebSocketAdapter, RuntimeHost, Telemetry, plugin};
 ```
 
-- `&self`
-  - 读状态
-  - 允许并发执行
-- `&mut self`
-  - 写状态
-  - 在单插件 actor 内串行化
+## 测试
 
-如果你想写真正的 actor-first 插件，不走宏，直接使用 `ActorPluginBuilder`。
+跑全部测试：
 
-这也是当前推荐的“功能内聚，一个插件 struct 承载自己的状态和行为”的用法。
-
-另外，插件声明现在分成两层：
-
-- `#[plugin] impl Type`
-  - 挂在插件的 `impl` 上
-  - 负责状态初始化和 handler 注册
-  - `name` 默认等于 struct 名
-  - `id` 默认等于 struct 名的 snake_case
-  - 对 unit struct 默认使用 `Self` 初始化
-  - 有状态 struct 时直接写 Rust 表达式，例如 `#[plugin(Self { count: 0 })]`
-
-### 路由方式
-
-```rust
-#[message("/ping")]
-#[message("/admin", kind = "prefix")]
-#[message(pattern = r"^\d+$", kind = "regex")]
-#[message(fallback)]
-
-#[message(keyword = "最低多少钱")]
-#[event("order_create")]
+```bash
+cargo test
 ```
 
-消息侧现在推荐只记一个属性：`#[message(...)]`。  
-`command` 仍可作为兼容别名使用，但不再是推荐 API。
+只跑闲鱼 adapter：
 
-推荐写法：
-
-- 精确匹配：`#[message("/ping")]`
-- 关键词匹配：`#[message(keyword = "你好")]`
-- 前缀匹配：`#[message("/admin", kind = "prefix")]`
-- 正则匹配：`#[message(pattern = r"^\\d+$", kind = "regex")]`
-- 兜底：`#[message(fallback)]`
-
-`RuntimeHost` 启动后，会根据 `RouteHint` 建索引，尽量把事件只派发给可能命中的插件。
-
-## Context API
-
-现在对插件作者暴露的是两个明确上下文，而不是一个“双语义 Context”：
-
-- `MessageContext`
-  - 用在 `#[message]`
-  - 常用方法：`reply(...)`、`text()`、`sender_id()`、`cid()`、`event()`
-- `EventContext`
-  - 用在 `#[event]`
-  - 常用方法：`event_type()`、`payload()`、`event()`
-
-两个上下文都提供：
-
-- `adapter()`
-- `app_ctx()`
-- `telemetry()`
-
-这样插件作者不需要再记“哪些方法只有在某种上下文里才能调用”，类型本身就表达了能力边界。
-
-## 状态模型
-
-当前项目有两种状态使用方式。
-
-### 方式一：状态就是插件 struct 字段
-
-这是默认推荐方式，最符合“高内聚”：
-
-```rust
-struct Counter {
-    value: u64,
-}
-
-#[plugin(Self { value: 0 })]
-impl Counter {
-    #[message("/incr")]
-    async fn incr(&mut self, ctx: MessageContext) -> Result<()> {
-        self.value += 1;
-        ctx.reply(format!("value={}", self.value)).await?;
-        Ok(())
-    }
-}
+```bash
+cargo test -p fish-rt-adapter -- --nocapture
 ```
 
-### 方式二：用 `ActorPluginBuilder` 走 actor-first 范式
+只跑 adapter facade 集成测试：
 
-适合你希望插件就是 actor、本身有 typed message、有 `ask` / `tell` 心智的场景：
-
-```rust
-use fish_runtime::prelude::*;
-use kameo::Actor;
-use kameo::message::{Context, Message};
-
-#[derive(Actor)]
-struct CounterActor {
-    value: u64,
-}
-
-struct Incr(MessageContext);
-struct CurrentValue;
-
-impl Message<Incr> for CounterActor {
-    type Reply = Result<()>;
-
-    async fn handle(&mut self, msg: Incr, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.value += 1;
-        msg.0.reply(format!("value={}", self.value)).await
-    }
-}
-
-impl Message<CurrentValue> for CounterActor {
-    type Reply = u64;
-
-    async fn handle(
-        &mut self,
-        _msg: CurrentValue,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.value
-    }
-}
-
-let plugin = ActorPluginBuilder::new(|| CounterActor { value: 0 })
-    .id("counter")
-    .name("Counter")
-    .bounded_mailbox(128)
-    .on_message("/incr", Incr);
+```bash
+cargo test --test fish_rt_adapter_api_test -- --nocapture
 ```
 
-这条路的重点不是“再包一层 handler 闭包”，而是：
+## 适合谁
 
-- 你定义的是 actor 本身
-- 路由只负责把 `MessageContext` / `EventContext` 映射成 typed message
-- 插件内部状态在 actor 里，不在 `RwLock<T>` 里
-- builder 本身就是最终插件定义
-- `id/name` 默认从 actor 类型名派生，只有需要覆写时才显式设置
-- 内部 handler id 从消息类型自动派生，不再要求作者手填
-- mailbox 只是 builder 上的一个配置点，不再额外引入公开类型
-- 需要时可以直接拿 `actor_ref()` 做 `ask` / `tell`
+这个仓库适合两类人：
 
-## ActorPluginBuilder
+- 想快速做一个闲鱼消息机器人，但不想把协议、调度和业务逻辑揉在一起的人
+- 想复用消息运行时，只把闲鱼 adapter 当成默认实现的人
 
-`ActorPluginBuilder` 的价值在于：
-
-- 让插件作者直接写 `kameo` actor 和 typed message
-- 让 runtime 只负责 route -> actor message 的转发
-- 保留运行时的 metadata、telemetry、timeout、queue 配置
-- 不需要为了 actor 插件再退回到“注册一组闭包”
-
-## 共享依赖注入
-
-`Ctx` 是一个按类型存取的共享容器，用来承载宿主注入的依赖：
-
-```rust
-let ctx = Arc::new(Ctx::new());
-ctx.insert(MyDatabasePool::new());
-ctx.insert(MyConfig::from_env()?);
-```
-
-在 handler 中读取：
-
-```rust
-let pool = ctx.app_ctx().get::<MyDatabasePool>();
-```
-
-这部分是宿主和业务之间的桥，不应该退化成一组难以维护的全局变量。
-
-## 运行时行为
-
-运行时默认做了几件事：
-
-- 基于 `RouteHint` 的消息预路由
-- 每个插件独立 actor、独立并发限制
-- handler 超时控制
-- 队列策略控制
-- telemetry 统计
-
-队列策略目前支持：
-
-- `QueueStrategy::DropNewest`
-- `QueueStrategy::DropOldest(n)`
-
-如果某个插件很慢，它只会影响自己的 actor，不会把整个 runtime 拖成串行系统。
-
-## 示例项目
-
-### `examples/quickstart-simple`
-
-用途：
-
-- 理解最小宿主接线
-- 看 `BaseAdapter -> RuntimeHost -> Plugin` 的完整流转
-- 演示默认 `FishWebSocketAdapter` 下的宏插件接线
-
-入口文件：
-
-- [examples/quickstart-simple/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/bootstrap.rs)
-- [examples/quickstart-simple/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/plugin.rs)
-
-### `examples/quickstart-custom`
-
-用途：
-
-- 演示 `ActorPluginBuilder` 的 actor-first 用法
-- 展示 `MessageContext` 如何被路由到 typed actor message
-- 演示默认 `FishWebSocketAdapter` 下的 actor 插件接线
-
-入口文件：
-
-- [examples/quickstart-custom/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/bootstrap.rs)
-- [examples/quickstart-custom/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/plugin.rs)
-
-## 项目原则
-
-这次重构后的方向可以概括成四句话：
-
-- trait 放在稳定边界上
-- 运行时实现收敛在 `fish-runtime`
-- 插件能力按功能内聚，不按想象中的扩展点过度拆 crate
-- 宿主尽量薄，只负责接线和业务编排
-
-如果未来要接其他宿主，优先扩展 adapter 和 bootstrap，不要把 runtime 重新拆碎。
-
-## License
-
-MIT OR Apache-2.0
+如果你要的是“一个完整的闲鱼自动交易系统”，这里还不是成品。
+如果你要的是“一个边界清晰、能继续扩展的运行时底座”，这个仓库就是干这个的。
