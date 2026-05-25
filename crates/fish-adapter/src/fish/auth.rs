@@ -1,4 +1,4 @@
-use fish_core::error::{AppError, Result};
+use fish_core::error::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

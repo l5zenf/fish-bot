@@ -28,7 +28,6 @@ pub use fish_plugin::{
     Capability, EventHandler, EventHandlerFunc, EventHandlerFuture, HandlerContext, HandlerFunc,
     HandlerFuture, MessageHandler, Plugin, PluginManifest, PluginMetadata, QueueStrategy,
     RouteHint, RuntimeConfig, StatefulPlugin, stateful_initial_state,
-    register_plugin, registered_plugins,
 };
 
 pub use fish_runtime::{HandleEvent, HandleSystemEvent, PluginActor};
@@ -156,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn s6_7_plugin_with_registry() {
+    fn s6_7_plugin_can_be_composed_explicitly() {
         #[plugin(id = "reg_derive", name = "RegDerive")]
         #[derive(Default)]
         struct RegPlugin;
@@ -167,8 +166,8 @@ mod tests {
             async fn ping(&mut self, _ctx: Context) -> Result<()> { Ok(()) }
         }
 
-        register_plugin(RegPlugin);
-        let plugins = registered_plugins();
-        assert!(plugins.iter().any(|p| p.metadata().id == "reg_derive"));
+        let plugins: Vec<std::sync::Arc<dyn Plugin>> = vec![std::sync::Arc::new(RegPlugin)];
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].metadata().id, "reg_derive");
     }
 }

@@ -7,8 +7,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::RwLock;
-
 use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::error::Result;
@@ -332,23 +330,6 @@ pub fn stateful_initial_state<P: StatefulPlugin>(plugin: &P) -> Arc<dyn Any + Se
     Arc::new(state) as Arc<dyn Any + Send + Sync>
 }
 
-// ---- Global registry ----
-
-static REGISTRY: std::sync::LazyLock<RwLock<Vec<Arc<dyn Plugin>>>> =
-    std::sync::LazyLock::new(|| RwLock::new(Vec::new()));
-
-/// Register a plugin globally.
-pub fn register_plugin(plugin: impl Plugin) {
-    let mut plugins = REGISTRY.write();
-    plugins.push(Arc::new(plugin));
-}
-
-/// Get all registered plugins.
-pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
-    let plugins = REGISTRY.read();
-    plugins.clone()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,11 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn t2_2_register_and_list() {
-        register_plugin(TestPlugin::new());
-        let plugins = registered_plugins();
-        let found = plugins.iter().any(|p| p.metadata().id == "test");
-        assert!(found);
+    fn t2_2_plugin_supports_matching_events() {
+        let plugin = TestPlugin::new();
+        let event = MessageEvent::new(
+            "cid".into(),
+            "uid".into(),
+            "name".into(),
+            "/hello".into(),
+            serde_json::json!({}),
+        );
+
+        assert!(plugin.supports(&event));
     }
 
     #[test]
@@ -410,18 +397,9 @@ mod tests {
     }
 
     #[test]
-    fn t2_3_duplicate_registration_allowed() {
-        struct DupPlugin {
-            meta: PluginMetadata,
-        }
-        impl Plugin for DupPlugin {
-            fn metadata(&self) -> &PluginMetadata { &self.meta }
-        }
-        register_plugin(DupPlugin { meta: PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() } });
-        register_plugin(DupPlugin { meta: PluginMetadata { id: "dup".into(), name: "".into(), description: "".into(), ..Default::default() } });
-        let plugins = registered_plugins();
-        let count = plugins.iter().filter(|p| p.metadata().id == "dup").count();
-        assert_eq!(count, 2, "duplicate registration should be allowed at registry level");
+    fn t2_3_plugin_metadata_id_is_stable() {
+        let plugin = TestPlugin::new();
+        assert_eq!(plugin.metadata().id, "test");
     }
 
     #[test]
@@ -501,18 +479,28 @@ mod tests {
     }
 
     #[test]
-    fn t2_34_register_plugin_increases_registry() -> anyhow::Result<()> {
-        struct RegPlugin {
-            meta: PluginMetadata,
+    fn t2_34_stateful_initial_state_wraps_rwlock() -> anyhow::Result<()> {
+        struct StatefulTestPlugin;
+        impl Plugin for StatefulTestPlugin {
+            fn metadata(&self) -> &PluginMetadata {
+                static META: std::sync::LazyLock<PluginMetadata> =
+                    std::sync::LazyLock::new(PluginMetadata::default);
+                &META
+            }
         }
-        impl Plugin for RegPlugin {
-            fn metadata(&self) -> &PluginMetadata { &self.meta }
+        impl StatefulPlugin for StatefulTestPlugin {
+            type State = usize;
+
+            fn create_initial_state(&self) -> Self::State {
+                7
+            }
         }
 
-        let before = registered_plugins().len();
-        register_plugin(RegPlugin { meta: PluginMetadata { id: "reg_check".into(), ..Default::default() } });
-        let after = registered_plugins().len();
-        assert!(after >= before + 1, "registry should have grown");
+        let state = stateful_initial_state(&StatefulTestPlugin);
+        let lock = state
+            .downcast_ref::<parking_lot::RwLock<usize>>()
+            .expect("state should be RwLock<usize>");
+        assert_eq!(*lock.read(), 7);
         Ok(())
     }
 

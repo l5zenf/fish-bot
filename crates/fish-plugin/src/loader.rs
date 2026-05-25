@@ -15,23 +15,24 @@ impl PluginManager {
         }
     }
 
-    /// Load all plugins — discovers globally registered plugins.
-    pub fn load_all_plugins(&mut self) {
-        let registered = crate::registered_plugins();
-        for plugin in registered {
+    /// Build a plugin manager from explicitly provided plugin instances.
+    pub fn from_plugins(plugins: Vec<Arc<dyn Plugin>>) -> Self {
+        let mut manager = Self::new();
+        for plugin in plugins {
             let meta = plugin.metadata();
             let name = meta.id.clone();
-            if self.plugins.contains_key(&name) {
+            if manager.plugins.contains_key(&name) {
                 tracing::warn!("Plugin naming conflict, skipping: [{}]", name);
                 continue;
             }
-            self.plugins.insert(name.clone(), plugin.clone());
+            manager.plugins.insert(name.clone(), plugin.clone());
             tracing::info!(
                 "Successfully loaded plugin: [{}] v{}",
                 name,
                 meta.version
             );
         }
+        manager
     }
 
     /// Number of loaded plugins.
@@ -53,7 +54,7 @@ impl Default for PluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{register_plugin, Plugin, PluginMetadata};
+    use crate::{Plugin, PluginMetadata};
 
     struct TestPluginA {
         meta: PluginMetadata,
@@ -77,41 +78,42 @@ mod tests {
     }
 
     #[test]
-    fn t2_15_load_all_plugins() {
-        register_plugin(TestPluginA { meta: PluginMetadata { id: "plugin_a".into(), name: "A".into(), ..Default::default() } });
-        register_plugin(TestPluginB { meta: PluginMetadata { id: "plugin_b".into(), name: "B".into(), ..Default::default() } });
+    fn t2_15_from_plugins_loads_explicit_plugins() {
+        let plugins = vec![
+            Arc::new(TestPluginA {
+                meta: PluginMetadata { id: "plugin_a".into(), name: "A".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+            Arc::new(TestPluginB {
+                meta: PluginMetadata { id: "plugin_b".into(), name: "B".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+        ];
 
-        let mut mgr = PluginManager::new();
-        mgr.load_all_plugins();
+        let mgr = PluginManager::from_plugins(plugins);
         assert!(mgr.plugins.contains_key("plugin_a"), "plugin_a should be loaded");
         assert!(mgr.plugins.contains_key("plugin_b"), "plugin_b should be loaded");
+    }
+
+    #[test]
+    fn t2_16_from_plugins_skips_duplicate_ids() {
+        let plugins = vec![
+            Arc::new(TestPluginA {
+                meta: PluginMetadata { id: "test_dupe_id".into(), name: "X".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+            Arc::new(TestPluginB {
+                meta: PluginMetadata { id: "test_dupe_id".into(), name: "X2".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+        ];
+
+        let mgr = PluginManager::from_plugins(plugins);
+        assert!(mgr.plugins.contains_key("test_dupe_id"), "plugin should be loaded");
+        assert_eq!(mgr.plugins["test_dupe_id"].metadata().name, "X",
+            "first registered plugin should be the one loaded");
     }
 
     #[test]
     fn t2_17_is_empty_before_after() {
         let mgr = PluginManager::new();
         assert!(mgr.is_empty());
-    }
-
-    #[test]
-    fn t2_16_duplicate_id_skipped() {
-        struct PluginX { meta: PluginMetadata }
-        impl Plugin for PluginX {
-            fn metadata(&self) -> &PluginMetadata { &self.meta }
-        }
-        struct PluginXDuplicate { meta: PluginMetadata }
-        impl Plugin for PluginXDuplicate {
-            fn metadata(&self) -> &PluginMetadata { &self.meta }
-        }
-
-        register_plugin(PluginX { meta: PluginMetadata { id: "test_dupe_id".into(), name: "X".into(), ..Default::default() } });
-        register_plugin(PluginXDuplicate { meta: PluginMetadata { id: "test_dupe_id".into(), name: "X2".into(), ..Default::default() } });
-
-        let mut mgr = PluginManager::new();
-        mgr.load_all_plugins();
-        assert!(mgr.plugins.contains_key("test_dupe_id"), "plugin should be loaded");
-        assert_eq!(mgr.plugins["test_dupe_id"].metadata().name, "X",
-            "first registered plugin should be the one loaded");
     }
 
     #[test]
@@ -148,21 +150,24 @@ mod tests {
     }
 
     #[test]
-    fn t2_29_load_all_plugins_twice() -> anyhow::Result<()> {
+    fn t2_29_from_plugins_deduplicates_within_input() -> anyhow::Result<()> {
         struct OncePlugin { meta: PluginMetadata }
         impl Plugin for OncePlugin {
             fn metadata(&self) -> &PluginMetadata { &self.meta }
         }
 
-        register_plugin(OncePlugin { meta: PluginMetadata { id: "load_twice".into(), name: "Once".into(), ..Default::default() } });
-        let mut mgr = PluginManager::new();
-        mgr.load_all_plugins();
-        let count_after_first = mgr.plugins.iter().filter(|(k, _)| *k == "load_twice").count();
-        assert_eq!(count_after_first, 1, "plugin should be loaded once");
+        let plugins = vec![
+            Arc::new(OncePlugin {
+                meta: PluginMetadata { id: "load_twice".into(), name: "Once".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+            Arc::new(OncePlugin {
+                meta: PluginMetadata { id: "load_twice".into(), name: "Once Again".into(), ..Default::default() },
+            }) as Arc<dyn Plugin>,
+        ];
 
-        mgr.load_all_plugins();
-        let count_after_second = mgr.plugins.iter().filter(|(k, _)| *k == "load_twice").count();
-        assert_eq!(count_after_second, 1, "loading twice should not add a duplicate");
+        let mgr = PluginManager::from_plugins(plugins);
+        let count = mgr.plugins.iter().filter(|(k, _)| *k == "load_twice").count();
+        assert_eq!(count, 1, "duplicate ids should be loaded once");
         Ok(())
     }
 }

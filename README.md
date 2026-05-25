@@ -62,6 +62,19 @@ RUST_LOG=info cargo run -p fish-bot
 RUST_LOG=info,reqwest=warn,tungstenite=warn cargo run -p fish-bot
 ```
 
+当前版本不再使用全局插件注册表。插件在启动入口显式组装：
+
+```rust
+use std::sync::Arc;
+use fish_plugin::loader::PluginManager;
+
+let plugins: Vec<Arc<dyn fish_plugin::Plugin>> = vec![
+    Arc::new(EchoPlugin::default()),
+];
+
+let plugin_manager = PluginManager::from_plugins(plugins);
+```
+
 ## 写一个插件
 
 两个 proc macro 完成全部定义：
@@ -81,8 +94,14 @@ impl Greeter {
         Ok(())
     }
 }
+```
 
-register_plugin(Greeter::default());
+然后在应用入口显式收集插件：
+
+```rust
+let plugins: Vec<Arc<dyn fish_plugin::Plugin>> = vec![
+    Arc::new(Greeter::default()),
+];
 ```
 
 ### Handler 签名与状态语义
@@ -213,8 +232,7 @@ PluginBuilder::new("echo", "Echo")
             Ok(())
         })
     }))
-    .build()
-    .register();
+    .build();
 ```
 
 有状态版本，显式传入初始状态：
@@ -232,9 +250,10 @@ PluginBuilder::new("counter", "Counter")
             Ok(())
         })
     }))
-    .build()
-    .register();
+    .build();
 ```
+
+`PluginBuilder::build()` 返回一个可直接放进 `Vec<Arc<dyn Plugin>>` 的插件实例；是否启用它，由组合根决定。
 
 ### 能力声明与运行时配置
 
@@ -367,7 +386,7 @@ pub enum AppError {
 ```
 fish-core          核心数据类型（MessageEvent, SystemEvent, Rule, AppError, Ctx, Telemetry）
 fish-adapter       平台适配层（WebSocket, API, 认证, 协议, MTOP 签名）
-fish-plugin        插件 trait、MessageHandler、EventHandler、注册表
+fish-plugin        插件 trait、MessageHandler、EventHandler、PluginManager
 fish-runtime       Actor 运行时（PluginActor、派发、队列策略）
 fish-plugin-sdk    统一 SDK 入口：re-export、Context、Builder、prelude
 fish-plugin-macros Proc macro：#[plugin] + #[plugin_handlers]

@@ -236,13 +236,6 @@ impl Plugin for BuiltPlugin {
     }
 }
 
-impl BuiltPlugin {
-    /// Register this plugin in the global plugin registry.
-    pub fn register(self) {
-        fish_plugin::register_plugin(self);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,16 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn s3_5_builder_register() {
+    fn s3_5_builder_returns_composable_plugin() {
         let plugin = PluginBuilder::new("reg", "Reg")
             .command("ping", "/ping", Arc::new(|_: HandlerContext| {
                 Box::pin(async { Ok(()) })
             }))
             .build();
 
-        plugin.register();
-        let plugins = fish_plugin::registered_plugins();
-        assert!(plugins.iter().any(|p| p.metadata().id == "reg"));
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(plugin)];
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].metadata().id, "reg");
     }
 
     #[test]

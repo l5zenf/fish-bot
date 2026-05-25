@@ -9,5 +9,5 @@ pub use crate::{
     HandlerContext, HandlerFunc, HandlerFuture, MessageChain, MessageChainItem,
     MessageEvent, MessageHandler, MessageSegment, Plugin, PluginBuilder, PluginMetadata,
     QueueStrategy, Result, RouteHint, Rule, SystemEvent, Telemetry,
-    is_fullmatch, is_keywords, is_regex, is_startswith, register_plugin, registered_plugins,
+    is_fullmatch, is_keywords, is_regex, is_startswith,
 };
