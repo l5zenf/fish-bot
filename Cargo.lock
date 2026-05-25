@@ -322,14 +322,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fish-adapter"
+name = "fish-bot-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fish-core",
+ "fish-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "fish-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fish-example-fish-app"
+version = "0.1.0"
+dependencies = [
+ "fish-runtime",
+ "kameo",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fish-example-quickstart"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fish-core",
+ "fish-runtime",
+ "kameo",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fish-plugin-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "fish-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64",
  "fish-core",
+ "fish-plugin-macros",
  "futures",
+ "kameo",
  "md5",
  "mockall",
  "parking_lot",
@@ -347,106 +412,6 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
-]
-
-[[package]]
-name = "fish-bot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "fish-adapter",
- "fish-core",
- "fish-plugin",
- "fish-plugin-sdk",
- "fish-runtime",
- "kameo",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fish-bot-tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "fish-adapter",
- "fish-core",
- "serde_json",
-]
-
-[[package]]
-name = "fish-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "snafu",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fish-plugin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "fish-adapter",
- "fish-core",
- "parking_lot",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fish-plugin-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "fish-plugin-sdk"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "fish-adapter",
- "fish-core",
- "fish-plugin",
- "fish-plugin-macros",
- "fish-runtime",
- "parking_lot",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fish-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "fish-adapter",
- "fish-core",
- "fish-plugin",
- "kameo",
- "parking_lot",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1319,6 +1284,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-crate"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+dependencies = [
+ "toml_edit",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1977,6 +1951,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_datetime"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.11+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b59c4d22ed448339746c59b905d24568fcbb3ab65a500494f7b8c3e97739f2b"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+dependencies = [
+ "winnow",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2438,6 +2442,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wiremock"

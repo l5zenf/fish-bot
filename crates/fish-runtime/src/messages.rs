@@ -3,13 +3,12 @@ use std::time::Duration;
 
 use kameo::message::{Context, Message};
 
-use fish_adapter::adapter::BaseAdapter;
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
-use fish_plugin::{EventHandlerFunc, RouteHint};
 
 use crate::actor::PluginActor;
+use crate::{BaseAdapter, EventHandlerContext, EventHandlerFunc, MessageHandler, RouteHint};
 
 /// Handle a message event — fanned out by BotActor with shared deps.
 /// When `handler_id` is set, only that specific handler is executed
@@ -38,10 +37,14 @@ impl Message<HandleEvent> for PluginActor {
         // Fallback (handler_id=None): scan all handlers with rule checks.
         let handlers = self.plugin().message_handlers();
 
-        let matched_handlers: Vec<&fish_plugin::MessageHandler> = match &msg.handler_id {
+        let matched_handlers: Vec<&MessageHandler> = match &msg.handler_id {
             Some(hid) => {
                 // Bot-routed to a specific handler
-                match self.handler_index().get(hid).and_then(|&idx| handlers.get(idx)) {
+                match self
+                    .handler_index()
+                    .get(hid)
+                    .and_then(|&idx| handlers.get(idx))
+                {
                     Some(handler) => {
                         // For exact/prefix/keyword routes, Bot verified the match — skip rule.
                         // For regex/fallback routes, Bot cannot pre-filter — check the rule.
@@ -54,11 +57,7 @@ impl Message<HandleEvent> for PluginActor {
                                 None => true,
                             },
                         };
-                        if matched {
-                            vec![handler]
-                        } else {
-                            vec![]
-                        }
+                        if matched { vec![handler] } else { vec![] }
                     }
                     None => vec![],
                 }
@@ -80,7 +79,8 @@ impl Message<HandleEvent> for PluginActor {
                 Arc::clone(&msg.adapter),
                 Arc::clone(&msg.ctx),
                 Arc::clone(&msg.telemetry),
-            ).await;
+            )
+            .await;
         }
     }
 }
@@ -106,41 +106,54 @@ impl Message<HandleSystemEvent> for PluginActor {
         let handlers = self.plugin().event_handlers();
         let plugin_state = self.plugin_state.clone();
 
-        // Collect Arc clones before handlers is dropped (lifetime issue with tokio::spawn)
-        let funcs: Vec<(EventHandlerFunc, Option<Arc<dyn std::any::Any + Send + Sync>>)> = match &msg.handler_id {
+        let funcs: Vec<EventHandlerFunc> = match &msg.handler_id {
             Some(hid) => handlers
                 .values()
                 .flatten()
                 .filter(|h| &h.id == hid)
-                .map(|h| (Arc::clone(&h.func), plugin_state.clone()))
+                .map(|h| Arc::clone(&h.func))
                 .collect(),
             None => handlers
                 .get(&msg.event.event_type)
-                .map(|v| v.iter().map(|h| (Arc::clone(&h.func), plugin_state.clone())).collect())
+                .map(|v| {
+                    v.iter()
+                        .map(|h| Arc::clone(&h.func))
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
 
-        for (func, state) in funcs {
-            let event = Arc::clone(&msg.event);
-            let adapter = Arc::clone(&msg.adapter);
-            let ctx = Arc::clone(&msg.ctx);
+        for func in funcs {
+            let handler_ctx = EventHandlerContext::__new(
+                Arc::clone(&msg.event),
+                Arc::clone(&msg.adapter),
+                Arc::clone(&msg.ctx),
+                Arc::clone(&msg.telemetry),
+                plugin_state.clone(),
+            );
             let telemetry = Arc::clone(&msg.telemetry);
             let handler_timeout = Duration::from_secs(5);
 
-            telemetry.handler_started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            telemetry
+                .handler_started
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
-                let result = tokio::time::timeout(handler_timeout, (func)(event, adapter, ctx, state)).await;
+                let result = tokio::time::timeout(handler_timeout, (func)(handler_ctx)).await;
                 match result {
                     Ok(Ok(())) => {
-                        telemetry.handler_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        telemetry
+                            .handler_succeeded
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::debug!(
                             cost_ms = started.elapsed().as_millis(),
                             "system event handler finished"
                         );
                     }
                     Ok(Err(e)) => {
-                        telemetry.handler_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        telemetry
+                            .handler_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             error = %e,
                             cost_ms = started.elapsed().as_millis(),
@@ -148,7 +161,9 @@ impl Message<HandleSystemEvent> for PluginActor {
                         );
                     }
                     Err(_) => {
-                        telemetry.handler_timed_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        telemetry
+                            .handler_timed_out
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
                             timeout_ms = handler_timeout.as_millis(),
                             "system event handler timeout"

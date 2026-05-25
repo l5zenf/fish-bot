@@ -1,7 +1,7 @@
+use parking_lot::RwLock;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Dependency container — holds Arc<dyn Any + Send + Sync> keyed by TypeId.
 ///
@@ -74,7 +74,9 @@ mod tests {
         let ctx = Ctx::new();
         ctx.insert(DbPool(42));
 
-        let pool = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        let pool = ctx
+            .get::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
         assert_eq!(pool.0, 42);
         Ok(())
     }
@@ -92,7 +94,9 @@ mod tests {
         ctx.insert(DbPool(1));
         ctx.insert(DbPool(2));
 
-        let pool = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        let pool = ctx
+            .get::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
         assert_eq!(pool.0, 2);
         Ok(())
     }
@@ -102,7 +106,9 @@ mod tests {
         let ctx = Ctx::new();
         let val = Arc::new(DbPool(99));
         ctx.insert_arc(Arc::clone(&val));
-        let pool = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        let pool = ctx
+            .get::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
         assert_eq!(pool.0, 99);
         Ok(())
     }
@@ -111,7 +117,9 @@ mod tests {
     fn t1_32_remove_then_get_returns_none() -> anyhow::Result<()> {
         let ctx = Ctx::new();
         ctx.insert(DbPool(42));
-        let removed = ctx.remove::<DbPool>().ok_or_else(|| anyhow::anyhow!("remove should return value"))?;
+        let removed = ctx
+            .remove::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("remove should return value"))?;
         assert_eq!(removed.0, 42);
 
         let pool: Option<Arc<DbPool>> = ctx.get::<DbPool>();
@@ -125,8 +133,18 @@ mod tests {
         ctx.insert(DbPool(1));
         ctx.insert(Config("prod".into()));
 
-        assert_eq!(ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool"))?.0, 1);
-        assert_eq!(ctx.get::<Config>().ok_or_else(|| anyhow::anyhow!("Config"))?.0, "prod");
+        assert_eq!(
+            ctx.get::<DbPool>()
+                .ok_or_else(|| anyhow::anyhow!("DbPool"))?
+                .0,
+            1
+        );
+        assert_eq!(
+            ctx.get::<Config>()
+                .ok_or_else(|| anyhow::anyhow!("Config"))?
+                .0,
+            "prod"
+        );
         Ok(())
     }
 
@@ -146,7 +164,9 @@ mod tests {
             let _ = h.join();
         }
 
-        let val = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        let val = ctx
+            .get::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
         assert!(val.0 < 10);
         Ok(())
     }
@@ -165,7 +185,9 @@ mod tests {
         ctx.insert(DbPool(1));
         ctx.insert_arc(Arc::new(DbPool(99)));
 
-        let pool = ctx.get::<DbPool>().ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
+        let pool = ctx
+            .get::<DbPool>()
+            .ok_or_else(|| anyhow::anyhow!("DbPool should exist"))?;
         assert_eq!(pool.0, 99);
         Ok(())
     }

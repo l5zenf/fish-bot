@@ -165,7 +165,11 @@ mod tests {
         chain.append(MessageSegment::image("pic.jpg"));
 
         let event = MessageEvent::new(
-            "cid".into(), "uid".into(), "Alice".into(), chain, serde_json::json!({}),
+            "cid".into(),
+            "uid".into(),
+            "Alice".into(),
+            chain,
+            serde_json::json!({}),
         );
 
         assert_eq!(event.plain_text(), "hello");

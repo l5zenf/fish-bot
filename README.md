@@ -2,406 +2,466 @@
 
 ![](./assets/bkg.png)
 
-## 为什么用 actor 模型？
+一个围绕闲鱼消息场景构建的 Rust 插件运行时。
 
-聊天机器人需要同时处理多个会话——慢操作（API 调用、网络 I/O）不应阻塞快操作。Actor 模型让每个插件运行在独立的轻量级任务中，拥有隔离的状态、独立的并发控制和自动的 panic 恢复：
+现在的设计目标很明确：
 
-```
-adapter → Bot (路由器) → PluginActor A ── 信号量 ── handler 任务
-                          PluginActor B ── 信号量 ── handler 任务
-                          PluginActor C ── 信号量 ── handler 任务
-```
+- `fish-core` 定义稳定抽象和通用模型
+- `fish-runtime` 提供运行时编排能力，并内置默认的闲鱼适配实现
+- `fish-plugin-macros` 提供插件声明宏
+- 宿主只是组装 `adapter + plugins + context`，不和运行时内部实现耦合
 
-每个 actor 有独立的信号量限制并发数。插件 A 某个 handler 慢，只消耗 A 的许可池，B 和 C 完全不受影响。任何 handler 的 panic 被 actor 框架捕获，不会扩散。
+这意味着你可以把 `fish-runtime` 嵌进任何宿主里使用，不管入口是 CLI、`axum`、`pyo3`，还是你自己的进程管理框架。仓库里的 example 只是接线示例，不是唯一使用方式。
 
-## 架构
+## 当前结构
 
+```text
+crates/
+  fish-core           稳定抽象：BaseAdapter / AdapterEventSink / 事件 / 消息 / Rule / Ctx
+  fish-runtime        运行时编排：RuntimeHost / Bot / PluginActor / PluginBuilder / 默认 Fish 适配器
+  fish-plugin-macros  #[plugin] / #[plugin_handlers]
 
-
-```
-┌─────────────┐     ┌──────────────────────────────────────────────────┐
-│  Adapter    │────▶│  Bot (路由器)                                    │
-│  (WebSocket │     │                                                  │
-│   + API)    │     │  exact_routes: HashMap<String, Vec<RouteTarget>> │  O(1)
-│             │     │  prefix_routes:  Vec<(String, RouteTarget)>      │  O(n)
-│  回调:      │     │  keyword_routes: Vec<(String, RouteTarget)>      │  O(n)
-│  MessageEvent   │  │  fallback_routes: Vec<RouteTarget>               │  总是
-│  SystemEvent│     │  event_routes: HashMap<String, Vec<RouteTarget>> │  按类型
-└─────────────┘     └─────┬────────────────────────────────────────────┘
-                          │ 分发到匹配的 handler
-                          ▼
-              ┌──────────────────────────┐
-              │  PluginActor (每个插件)   │
-              │  ┌─ 信号量               │
-              │  └─ QueueStrategy        │
-              └──────────────────────────┘
-                          │ 启动 handler
-                          ▼
-                 handler 任务 — tokio::spawn
+examples/
+  quickstart          离线最小可运行示例
+  fish-app            真实闲鱼宿主骨架
 ```
 
-启动时，Bot 根据所有插件声明的 `RouteHint` 编译路由表：
+依赖方向保持单向：
 
-- **精确匹配** → `HashMap` 查找，O(1)，零扫描
-- **前缀/关键词** → 线性扫描注册的目标
-- **正则/兜底** → 总是派发，PluginActor 自行检查规则
-- **事件路由** → 按事件类型 `HashMap` 查找
+```text
+fish-runtime -> fish-core
+fish-plugin-macros -> fish-runtime
+```
 
-大多数消息以常数时间找到目标，PluginActor 只收到自己能处理的事件。
+## 核心心智模型
+
+运行时只做一件事：把外部平台事件安全、可控地分发给插件。
+
+```text
+BaseAdapter
+  -> RuntimeHost
+     -> Bot
+        -> PluginActor
+           -> handler
+```
+
+职责划分：
+
+- `BaseAdapter`
+  - 负责接入外部平台
+  - 把消息事件和系统事件推给 runtime
+  - 提供发送消息能力
+- `RuntimeHost`
+  - 负责把 adapter、plugins、共享上下文组装起来
+  - 作为标准启动入口
+- `Bot`
+  - 根据 `RouteHint` 做路由预过滤
+  - 把事件分发到对应插件 actor
+- `PluginActor`
+  - 为单个插件隔离状态、并发和超时控制
+  - 执行真正的 handler
+
+这个边界的重点是：宿主只依赖 trait 和公开 API，不需要知道 runtime 内部怎么调度。
+
+## 为什么用 actor
+
+聊天类业务天然是高并发、多会话、慢操作和快操作混在一起。actor 模型比较适合这个场景：
+
+- 插件状态天然隔离
+- 一个插件变慢不会拖垮其他插件
+- `&self` 和 `&mut self` handler 能自然表达并发语义
+- panic 和超时可以限制在单个插件 actor 内部
+
+这比把所有插件都挂在一堆全局变量上更容易维护，也更容易替换宿主实现。
 
 ## 快速开始
 
+仓库里有两个 example 项目：
+
+- `examples/quickstart`
+  - 离线运行
+  - 用本地 `LocalAdapter` 模拟事件下推
+  - 用来理解最小接线方式
+- `examples/fish-app`
+  - 使用 `fish-runtime` 内置的 `FishWebSocketAdapter`
+  - 作为真实闲鱼宿主骨架
+
+先跑离线例子：
+
 ```bash
-RUST_LOG=info cargo run -p fish-bot
+cargo run -p fish-example-quickstart
 ```
 
-首次运行无凭证时自动弹出终端二维码，用闲鱼 App 扫码登录。
+再跑真实闲鱼宿主：
 
 ```bash
-# 减少依赖库的日志输出
-RUST_LOG=info,reqwest=warn,tungstenite=warn cargo run -p fish-bot
+cargo run -p fish-example-fish-app
 ```
 
-当前版本不再使用全局插件注册表。插件在启动入口显式组装：
+运行 `fish-app` 前，建议准备本地认证信息：
+
+- `FISH_AUTH_JSON`
+- 或 `FISH_DATA_DIR/fish_auth.json`
+
+## 宿主如何启动 runtime
+
+标准启动方式就是把插件列表和 adapter 交给 `RuntimeHost`：
 
 ```rust
 use std::sync::Arc;
-use fish_plugin::loader::PluginManager;
 
-let plugins: Vec<Arc<dyn fish_plugin::Plugin>> = vec![
-    Arc::new(EchoPlugin::default()),
-];
+use fish_runtime::prelude::*;
+use fish_runtime::{FishWebSocketAdapter, RuntimeHost};
 
-let plugin_manager = PluginManager::from_plugins(plugins);
-```
-
-## 写一个插件
-
-两个 proc macro 完成全部定义：
-
-```rust
-use fish_plugin_sdk::prelude::*;
-
-#[plugin(id = "greeter", name = "Greeter")]
+#[plugin(id = "echo", name = "Echo")]
 #[derive(Default)]
-struct Greeter;
+struct EchoPlugin;
 
 #[plugin_handlers]
-impl Greeter {
+impl EchoPlugin {
     #[command("/ping")]
     async fn ping(&self, ctx: Context) -> Result<()> {
-        ctx.reply("pong!").await?;
+        ctx.reply("pong").await?;
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let adapter: Arc<dyn BaseAdapter> = Arc::new(FishWebSocketAdapter::new());
+    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(EchoPlugin)];
+
+    RuntimeHost::with_plugins(adapter, plugins).run().await
+}
+```
+
+如果你需要注入自己的共享依赖，也可以显式构造：
+
+```rust
+use std::sync::Arc;
+
+use fish_runtime::prelude::*;
+use fish_runtime::RuntimeHost;
+
+let adapter: Arc<dyn BaseAdapter> = Arc::new(MyAdapter::new());
+let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(MyPlugin::default())];
+
+let ctx = Arc::new(Ctx::new());
+ctx.insert(MyDatabasePool::new());
+
+let telemetry = Arc::new(Telemetry::new());
+
+RuntimeHost::new(adapter, plugins, ctx, telemetry).run().await?;
+```
+
+## 如果不用默认闲鱼实现
+
+`fish-runtime` 内置了默认的闲鱼 adapter，但 runtime 本身并不绑定闲鱼。
+
+你只要实现 `fish-core::BaseAdapter`，就能把 runtime 接到任何外部系统上：
+
+```rust
+use async_trait::async_trait;
+use std::sync::Arc;
+
+use fish_core::{AdapterEventSink, BaseAdapter};
+use fish_core::error::Result;
+use fish_core::event::MessageEvent;
+use fish_core::message::MessageChain;
+
+struct MyAdapter;
+
+#[async_trait]
+impl BaseAdapter for MyAdapter {
+    async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
+        println!("send -> target={target_id}, cid={:?}, payload={}", cid, message.summary());
+        Ok(())
+    }
+
+    async fn run(&self, sink: Arc<dyn AdapterEventSink>) -> Result<()> {
+        sink.handle_message(MessageEvent::new(
+            "demo-cid".into(),
+            "demo-user".into(),
+            "Demo User".into(),
+            "/ping".into(),
+            serde_json::json!({ "source": "custom-adapter" }),
+        ))
+        .await?;
+
         Ok(())
     }
 }
 ```
 
-然后在应用入口显式收集插件：
+这里的关键点不是“继承闲鱼实现”，而是“遵守稳定 trait 边界”。
+
+## 写插件
+
+推荐的插件开发方式是 `#[plugin] + #[plugin_handlers]`：
 
 ```rust
-let plugins: Vec<Arc<dyn fish_plugin::Plugin>> = vec![
-    Arc::new(Greeter::default()),
-];
+use fish_runtime::prelude::*;
+use fish_runtime::{plugin, plugin_handlers};
+
+#[plugin(id = "greeter", name = "Greeter")]
+#[derive(Default)]
+struct Greeter {
+    count: u64,
+}
+
+#[plugin_handlers]
+impl Greeter {
+    #[command("/ping")]
+    async fn ping(&self, ctx: Context) -> Result<()> {
+        ctx.reply("pong").await?;
+        Ok(())
+    }
+
+    #[message(keyword = "fish")]
+    async fn on_keyword(&mut self, ctx: Context) -> Result<()> {
+        self.count += 1;
+        ctx.reply(format!("keyword hit: {}, count={}", ctx.text()?, self.count))
+            .await?;
+        Ok(())
+    }
+
+    #[event("order_create")]
+    async fn on_order(&self, ctx: Context) -> Result<()> {
+        tracing::info!("event={}, payload={}", ctx.event_type()?, ctx.payload()?);
+        Ok(())
+    }
+}
 ```
 
-### Handler 签名与状态语义
+### Handler 签名语义
 
-三种 receiver 形式，对应不同的并发保证：
+插件状态和并发语义直接由 receiver 表达：
 
 ```rust
-// 无状态——不访问 struct，完全并发
-#[command("/stats")]
-async fn stats(ctx: Context) -> Result<()> { ... }
+#[command("/stat")]
+async fn stat(ctx: Context) -> Result<()> { ... }
 
-// 只读状态——允许并发读
-#[command("/count")]
+#[command("/read")]
 async fn read(&self, ctx: Context) -> Result<()> { ... }
 
-// 可变状态——串行化写
-#[command("/incr")]
-async fn incr(&mut self, ctx: Context) -> Result<()> { ... }
+#[command("/write")]
+async fn write(&mut self, ctx: Context) -> Result<()> { ... }
 ```
 
-actor 自动检测 receiver 类型并选择对应的锁：`&mut self` 获取写锁（串行），`&self` 获取读锁（并发）。
-同一个 impl 块中混用不同签名也能正常工作。
+- 无 receiver
+  - 适合无状态 handler
+- `&self`
+  - 读状态
+  - 允许并发执行
+- `&mut self`
+  - 写状态
+  - 在单插件 actor 内串行化
 
-### 状态即 struct 字段
+这也是当前推荐的“功能内聚，一个插件 struct 承载自己的状态和行为”的用法。
 
-插件的状态就是普通的 struct 字段——不需要包装类型，不需要手动 downcast：
+### 路由方式
+
+```rust
+#[command("/ping")]
+#[command("/admin", kind = "prefix")]
+#[command(pattern = r"^\d+$", kind = "regex")]
+#[command(fallback)]
+
+#[message(keyword = "最低多少钱")]
+#[event("order_create")]
+```
+
+`RuntimeHost` 启动后，`Bot` 会根据 `RouteHint` 建索引，尽量把事件只派发给可能命中的插件。
+
+## Context API
+
+`Context` 对插件作者暴露统一的调用面。
+
+消息 handler 中常用：
+
+- `ctx.reply("hello").await?`
+- `ctx.text()?`
+- `ctx.sender_id()?`
+- `ctx.cid()?`
+- `ctx.event()?`
+
+系统事件 handler 中常用：
+
+- `ctx.event_type()?`
+- `ctx.payload()?`
+
+所有 handler 中都可用：
+
+- `ctx.adapter()`
+- `ctx.app_ctx()`
+- `ctx.telemetry()`
+
+`Context` 会根据当前上下文类型做约束。比如在 `#[event]` handler 里调用 `ctx.reply()` 会返回错误，而不是 panic。
+
+## 状态模型
+
+当前项目有两种状态使用方式。
+
+### 方式一：状态就是插件 struct 字段
+
+这是默认推荐方式，最符合“高内聚”：
 
 ```rust
 #[plugin(id = "counter", name = "Counter")]
 #[derive(Default)]
 struct Counter {
-    count: u64,
+    value: u64,
 }
 
 #[plugin_handlers]
 impl Counter {
     #[command("/incr")]
     async fn incr(&mut self, ctx: Context) -> Result<()> {
-        self.count += 1;
-        ctx.reply(format!("Count: {}", self.count)).await
-    }
-
-    #[command("/count")]
-    async fn read(&self, ctx: Context) -> Result<()> {
-        ctx.reply(format!("Current: {}", self.count)).await
+        self.value += 1;
+        ctx.reply(format!("value={}", self.value)).await?;
+        Ok(())
     }
 }
 ```
 
-`&mut self` handler 在同一 actor 中串行执行，`&self` handler 可以并发执行。
-内部使用 `tokio::sync::RwLock` 管理状态，不需要手写 `Mutex` 样板代码。
+### 方式二：用 `PluginBuilder` 显式管理状态
 
-### 自定义初始化
-
-`#[plugin]` 不会自动注入 `Default`——需要显式添加，或通过 `init` 参数指定：
+适合程序化构建插件，或者不方便使用 proc macro 的场景：
 
 ```rust
-#[plugin(id = "my_plugin", name = "My Plugin", init = "MyPlugin::new()")]
-struct MyPlugin {
-    count: u64,
-}
-
-impl MyPlugin {
-    fn new() -> Self { Self { count: 42 } }
-}
-```
-
-### 匹配模式
-
-```rust
-#[command("/ping")]                     // 精确匹配（默认）
-#[command("/admin", kind = "prefix")]   // 前缀匹配
-#[command(pattern = r"\d+", kind = "regex")]  // 正则匹配
-#[command(fallback)]                    // 兜底，无匹配时执行
-
-#[message(keyword = "最低多少钱")]       // 关键词匹配
-```
-
-### 事件处理
-
-处理下单、售出等业务事件：
-
-```rust
-#[event("order_create")]
-async fn on_order(&self, ctx: Context) -> Result<()> {
-    tracing::info!("新订单: {:?}", ctx.payload()?);
-    Ok(())
-}
-```
-
-事件 handler 的 `Context` 处于 System 上下文——`ctx.reply()`、`ctx.text()`、`ctx.sender_id()` 会返回错误（它们只在消息上下文有意义）。
-应使用 `ctx.event_type()` 和 `ctx.payload()`。
-
-### Context API
-
-```
-消息上下文方法（#[command] / #[message] 中可用）：
-  ctx.reply("hello").await?     — 回复消息
-  ctx.sender_id()?              — 发送者用户 ID
-  ctx.cid()?                    — 会话/频道 ID
-  ctx.text()?                   — 消息纯文本
-  ctx.event()?                  — 原始 MessageEvent
-
-系统事件上下文方法（#[event] 中可用）：
-  ctx.event_type()?             — 事件类型字符串
-  ctx.payload()?                — 事件 JSON 载荷
-
-通用方法：
-  ctx.adapter()                 — 发送任意消息
-  ctx.app_ctx()                 — 依赖注入容器
-  ctx.telemetry()               — 可观测计数器
-```
-
-在系统 handler 中调用消息方法（反之亦然）会返回 `AppError::Internal`——不会 panic。
-
-## PluginBuilder（免 macro 方式）
-
-适合程序化构建插件，或 proc macro 不适用的场景：
-
-```rust
-use fish_plugin_sdk::prelude::*;
 use std::sync::Arc;
 
-PluginBuilder::new("echo", "Echo")
-    .command("echo", "/echo", Arc::new(|cx: HandlerContext| {
-        Box::pin(async move {
-            cx.event.reply(MessageSegment::text("echo!")).await;
-            Ok(())
-        })
-    }))
-    .build();
-```
+use fish_runtime::prelude::*;
 
-有状态版本，显式传入初始状态：
-
-```rust
-PluginBuilder::new("counter", "Counter")
+let plugin = PluginBuilder::new("counter", "Counter")
     .state(0u64)
     .command("incr", "/incr", Arc::new(|cx: HandlerContext| {
         Box::pin(async move {
-            let state = cx.plugin_state.clone().expect("有状态插件");
-            let lock = state.downcast::<parking_lot::RwLock<u64>>().expect("类型错误");
-            let mut val = lock.write();
-            *val += 1;
-            cx.event.reply(MessageSegment::text(format!("Count: {}", *val))).await;
+            let state = cx.state::<u64>()?;
+            let mut value = state.write().await;
+            *value += 1;
+            cx.event
+                .reply(MessageSegment::text(format!("value={}", *value)))
+                .await;
             Ok(())
         })
     }))
     .build();
 ```
 
-`PluginBuilder::build()` 返回一个可直接放进 `Vec<Arc<dyn Plugin>>` 的插件实例；是否启用它，由组合根决定。
+这里的 typed state 底层是 `tokio::sync::RwLock<T>`。
 
-### 能力声明与运行时配置
+也就是说：
+
+- 不需要在宿主里堆全局变量
+- 不需要手写一层层 `Any` downcast
+- 不需要到处塞 `Mutex`
+
+## PluginBuilder
+
+如果你更喜欢显式组装，也可以完全不使用宏：
 
 ```rust
-PluginBuilder::new("my_plugin", "My Plugin")
-    .capability(Capability::Network)
+use std::sync::Arc;
+use std::time::Duration;
+
+use fish_runtime::prelude::*;
+
+let plugin = PluginBuilder::new("echo", "Echo")
+    .description("builder style plugin")
     .capability(Capability::SendMessage)
-    .concurrency(16)
     .timeout(Duration::from_secs(10))
-    .queue_strategy(QueueStrategy::DropOldest(100))
+    .concurrency(16)
+    .queue_strategy(QueueStrategy::DropOldest(128))
+    .command("ping", "/ping", Arc::new(|cx: HandlerContext| {
+        Box::pin(async move {
+            cx.event.reply(MessageSegment::text("pong")).await;
+            Ok(())
+        })
+    }))
     .build();
 ```
 
-| Capability | 说明 |
-|---|---|
-| `Network` | 可发起 HTTP 请求 |
-| `FileSystem` | 可读本地文件 |
-| `FileSystemWrite` | 可写本地文件 |
-| `SendMessage` | 可通过 adapter 发消息 |
-| `ReadAppContext` | 可访问 Ctx 容器 |
+`PluginBuilder` 的价值在于：
 
-## 规则系统
+- 适合动态装配
+- 适合桥接外部配置
+- 适合在不引入 proc macro 的场景下集成 runtime
 
-Rule 是 `MessageEvent` 的可组合谓词：
+## 共享依赖注入
+
+`Ctx` 是一个按类型存取的共享容器，用来承载宿主注入的依赖：
 
 ```rust
-use fish_core::rule::*;
-
-// 组合子
-is_startswith("/admin").and(&is_keywords("delete"))
-is_fullmatch(["/help", "/h", "帮助"])
-is_regex(r"^\d{11}$").or(&is_fullmatch(["/phone"]))
-
-// 自定义
-Rule::new(|event: &MessageEvent| event.has_image())
-```
-
-`RouteHint` 告诉 Bot 如何索引 handler；`Rule` 是 PluginActor 中的实际匹配器。
-两者应一致但目的不同：
-
-- `RouteHint` 用于路由（性能）
-- `Rule` 用于匹配（语义）
-
-## 系统事件
-
-闲鱼通过 WebSocket 推送业务事件（非聊天消息）。Adapter 自动分类 `redReminder` 载荷：
-
-| redReminder | 映射事件 | 含义 |
-|---|---|---|
-| `1` | `order_create` | 买家下单 |
-| `2` | `order_closed` | 交易关闭 |
-| `3` | `item_purchased` | 商品售出 |
-
-事件通过 Bot 的 `event_routes` 派发，由 `#[event("order_create")]` handler 接收。
-
-## 消息协议
-
-消息解密链路：
-
-```
-base64 → msgpack → JSON（对嵌套字段递归）
-```
-
-1. base64 解码
-2. 用 `rmp-serde` 反序列化为 JSON Value
-3. msgpack 失败时退化为 JSON 直接解析
-4. 对已知嵌套字段递归执行解密
-
-过滤器丢弃以下消息：
-- 输入状态指示（正在输入）
-- `needPush=false` 的系统推送
-- 空或格式错误的消息
-
-## 队列策略
-
-插件达到并发上限时的处理策略：
-
-| 策略 | 行为 |
-|---|---|
-| `DropNewest`（默认） | 直接丢弃新事件 |
-| `DropOldest(n)` | 有界队列，丢弃最旧事件，追加最新事件 |
-
-防止慢插件堆积无限积压。
-
-## 可观测性
-
-18 个原子计数器，每 60 秒自动输出摘要：
-
-| 层 | 计数器 |
-|---|---|
-| 路由 | `messages_received`, `exact_route_hits`, `unmatched_messages`, `handler_dispatches` |
-| Handler | `handler_started`, `handler_succeeded`, `handler_failed`, `handler_timed_out` |
-| 队列 | `drop_newest_drops`, `drop_oldest_enqueues`, `drop_oldest_oldest_discards`, `queued_handler_succeeded/failed/timed_out` |
-
-handler 中访问：`ctx.telemetry().handler_started.fetch_add(1, ...)`。
-
-## 依赖注入
-
-```rust
-// 启动时注入
 let ctx = Arc::new(Ctx::new());
-ctx.insert(my_db_pool);
-
-// 任意 handler 中取出
-let pool = ctx.app_ctx().get::<PgPool>();
+ctx.insert(MyDatabasePool::new());
+ctx.insert(MyConfig::from_env()?);
 ```
 
-`Ctx` 是基于 `TypeId` 的容器，使用 `parking_lot::RwLock`——不需要静态生命周期。
-
-## 错误处理
-
-`AppError` 是基于 `snafu` 的错误枚举，每类错误有对应的构造函数：
+在 handler 中读取：
 
 ```rust
-pub enum AppError {
-    Http,       // HTTP 请求失败
-    Ws,         // WebSocket 错误
-    Json,       // serde_json 错误（自动 From 转换）
-    Base64,     // base64 解码错误（自动 From 转换）
-    Auth,       // 认证失败
-    Protocol,   // 协议层错误
-    Internal,   // 内部逻辑错误（上下文不匹配、不变性违反）
-}
+let pool = ctx.app_ctx().get::<MyDatabasePool>();
 ```
 
-生产代码路径零 unwrap。`parking_lot` 锁不会中毒。`serde_json` 和 `base64` 错误通过 `?` 自动转换。
+这部分是宿主和业务之间的桥，不应该退化成一组难以维护的全局变量。
 
-## Crate 结构
+## 运行时行为
 
-```
-fish-core          核心数据类型（MessageEvent, SystemEvent, Rule, AppError, Ctx, Telemetry）
-fish-adapter       平台适配层（WebSocket, API, 认证, 协议, MTOP 签名）
-fish-plugin        插件 trait、MessageHandler、EventHandler、PluginManager
-fish-runtime       Actor 运行时（PluginActor、派发、队列策略）
-fish-plugin-sdk    统一 SDK 入口：re-export、Context、Builder、prelude
-fish-plugin-macros Proc macro：#[plugin] + #[plugin_handlers]
-fish-bot           二进制入口、Bot 路由器、组装启动
-```
+运行时默认做了几件事：
 
-依赖方向（从上到下）：
+- 基于 `RouteHint` 的消息预路由
+- 每个插件独立 actor、独立并发限制
+- handler 超时控制
+- 队列策略控制
+- telemetry 统计
 
-```
-fish-bot → fish-runtime → fish-plugin-sdk → fish-plugin → fish-adapter → fish-core
-fish-bot → fish-adapter → fish-core
-fish-plugin-macros（独立 proc-macro crate）
-```
+队列策略目前支持：
 
-所有依赖为单向，无循环。
+- `QueueStrategy::DropNewest`
+- `QueueStrategy::DropOldest(n)`
+
+如果某个插件很慢，它只会影响自己的 actor，不会把整个 runtime 拖成串行系统。
+
+## 示例项目
+
+### `examples/quickstart`
+
+用途：
+
+- 理解最小宿主接线
+- 看 `BaseAdapter -> RuntimeHost -> Plugin` 的完整流转
+- 离线验证插件行为
+
+入口文件：
+
+- [examples/quickstart/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/bootstrap.rs)
+- [examples/quickstart/src/app/local_adapter.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/local_adapter.rs)
+- [examples/quickstart/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart/src/app/plugin.rs)
+
+### `examples/fish-app`
+
+用途：
+
+- 作为真实闲鱼宿主骨架
+- 演示如何直接使用 `FishWebSocketAdapter`
+- 给后续业务系统一个干净的接入起点
+
+入口文件：
+
+- [examples/fish-app/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/fish-app/src/app/bootstrap.rs)
+- [examples/fish-app/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/fish-app/src/app/plugin.rs)
+
+## 项目原则
+
+这次重构后的方向可以概括成四句话：
+
+- trait 放在稳定边界上
+- 运行时实现收敛在 `fish-runtime`
+- 插件能力按功能内聚，不按想象中的扩展点过度拆 crate
+- 宿主尽量薄，只负责接线和业务编排
+
+如果未来要接其他宿主，优先扩展 adapter 和 bootstrap，不要把 runtime 重新拆碎。
 
 ## License
 

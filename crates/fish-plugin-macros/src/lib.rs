@@ -1,8 +1,10 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use syn::{
+    FnArg, Ident, ImplItem, ItemImpl, LitStr, Token,
     parse::{Parse, ParseStream},
-    parse_macro_input, FnArg, Ident, ImplItem, ItemImpl, LitStr, Token,
+    parse_macro_input,
 };
 
 // ---- Exported proc macros ----
@@ -22,6 +24,17 @@ fn extract_struct_ident(tokens: &proc_macro2::TokenStream) -> Ident {
     panic!("no struct definition found in #[plugin] item");
 }
 
+fn runtime_path() -> proc_macro2::TokenStream {
+    match crate_name("fish-runtime") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::fish_runtime),
+    }
+}
+
 /// Attribute macro on the plugin struct: `#[plugin(id = "x", name = "y")]`
 ///
 /// Stores plugin metadata in a hidden module so `#[plugin_handlers]` can reference it.
@@ -31,6 +44,7 @@ fn extract_struct_ident(tokens: &proc_macro2::TokenStream) -> Ident {
 #[proc_macro_attribute]
 pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let meta = parse_macro_input!(attr as PluginMeta);
+    let runtime = runtime_path();
 
     let item: proc_macro2::TokenStream = item.into();
     let struct_ident = extract_struct_ident(&item);
@@ -72,9 +86,9 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
             use super::*;
 
             pub(super) static METADATA: std::sync::LazyLock<
-                fish_plugin_sdk::PluginMetadata
+                #runtime::PluginMetadata
             > = std::sync::LazyLock::new(|| {
-                fish_plugin_sdk::PluginMetadata {
+                #runtime::PluginMetadata {
                     id: String::from(#id),
                     name: String::from(#name),
                     description: String::from(#description),
@@ -95,6 +109,7 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut impl_block = parse_macro_input!(item as ItemImpl);
     let struct_name = &impl_block.self_ty;
+    let runtime = runtime_path();
 
     // Collect handler methods, keeping them in the output (with custom attrs stripped)
     let mut msg_exprs = Vec::new();
@@ -133,23 +148,38 @@ pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let receiver = detect_receiver(&method.sig.inputs);
 
                     if handler_attr.path().is_ident("command") {
-                        let cmd = parse_command_attr(&handler_attr)
-                            .expect("invalid #[command(...)]");
+                        let cmd =
+                            parse_command_attr(&handler_attr).expect("invalid #[command(...)]");
                         let expr = gen_message_handler(
-                            struct_name, &handler_ident, &cmd, receiver, false,
+                            &runtime,
+                            struct_name,
+                            &handler_ident,
+                            &cmd,
+                            receiver,
+                            false,
                         );
                         msg_exprs.push(expr);
                     } else if handler_attr.path().is_ident("message") {
-                        let msg = parse_message_attr(&handler_attr)
-                            .expect("invalid #[message(...)]");
+                        let msg =
+                            parse_message_attr(&handler_attr).expect("invalid #[message(...)]");
                         let expr = gen_message_handler(
-                            struct_name, &handler_ident, &msg, receiver, true,
+                            &runtime,
+                            struct_name,
+                            &handler_ident,
+                            &msg,
+                            receiver,
+                            true,
                         );
                         msg_exprs.push(expr);
                     } else if handler_attr.path().is_ident("event") {
-                        let evt = parse_event_attr(&handler_attr)
-                            .expect("invalid #[event(...)]");
-                        let expr = gen_event_handler(struct_name, &handler_ident, &evt, receiver);
+                        let evt = parse_event_attr(&handler_attr).expect("invalid #[event(...)]");
+                        let expr = gen_event_handler(
+                            &runtime,
+                            struct_name,
+                            &handler_ident,
+                            &evt,
+                            receiver,
+                        );
                         event_exprs.push(expr);
                     }
 
@@ -166,19 +196,19 @@ pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
     impl_block.items = kept_items;
 
     let expanded = quote! {
-        impl fish_plugin_sdk::Plugin for #struct_name {
-            fn metadata(&self) -> &fish_plugin_sdk::PluginMetadata {
+        impl #runtime::Plugin for #struct_name {
+            fn metadata(&self) -> &#runtime::PluginMetadata {
                 &__fish_plugin_meta::METADATA
             }
 
-            fn initial_state(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+            fn __initial_state(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
                 Some(std::sync::Arc::new(tokio::sync::RwLock::new(
                     __fish_plugin_create_initial_state(),
                 )))
             }
 
-            fn message_handlers(&self) -> &[fish_plugin_sdk::MessageHandler] {
-                static HANDLERS: std::sync::LazyLock<Vec<fish_plugin_sdk::MessageHandler>> =
+            fn message_handlers(&self) -> &[#runtime::MessageHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<#runtime::MessageHandler>> =
                     std::sync::LazyLock::new(|| {
                         vec![
                             #(#msg_exprs),*
@@ -187,7 +217,7 @@ pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 &HANDLERS
             }
 
-            fn event_handlers(&self) -> std::collections::HashMap<String, Vec<fish_plugin_sdk::EventHandler>> {
+            fn event_handlers(&self) -> std::collections::HashMap<String, Vec<#runtime::EventHandler>> {
                 let mut map = std::collections::HashMap::new();
                 #(#event_exprs)*
                 map
@@ -203,6 +233,7 @@ pub fn plugin_handlers(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // ---- Handler generation ----
 
 fn gen_message_handler(
+    runtime: &proc_macro2::TokenStream,
     struct_name: &syn::Type,
     handler_id: &str,
     cmd: &MessageHandlerData,
@@ -217,19 +248,15 @@ fn gen_message_handler(
     let closure_body = match receiver {
         ReceiverKind::MutRef => {
             quote! {
-                std::sync::Arc::new(move |cx: fish_plugin_sdk::HandlerContext| {
-                    let plugin_state = cx.plugin_state.clone()
-                        .expect("stateful plugin: plugin_state is None");
-                    let lock = plugin_state
-                        .downcast::<tokio::sync::RwLock<#struct_name>>()
-                        .expect("plugin_state type mismatch");
+                std::sync::Arc::new(move |cx: #runtime::HandlerContext| {
+                    let lock = #runtime::__state_lock_tokio::<#struct_name>(cx.__plugin_state());
                     let event = cx.event;
                     let adapter = cx.adapter;
                     let app_ctx = cx.app_ctx;
                     let telemetry = cx.telemetry;
                     Box::pin(async move {
                         let mut plugin = lock.write().await;
-                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
+                        let ctx = #runtime::Context::new(event, adapter, app_ctx, telemetry);
                         plugin.#method_name(ctx).await
                     })
                 })
@@ -237,19 +264,15 @@ fn gen_message_handler(
         }
         ReceiverKind::Ref => {
             quote! {
-                std::sync::Arc::new(move |cx: fish_plugin_sdk::HandlerContext| {
-                    let plugin_state = cx.plugin_state.clone()
-                        .expect("stateful plugin: plugin_state is None");
-                    let lock = plugin_state
-                        .downcast::<tokio::sync::RwLock<#struct_name>>()
-                        .expect("plugin_state type mismatch");
+                std::sync::Arc::new(move |cx: #runtime::HandlerContext| {
+                    let lock = #runtime::__state_lock_tokio::<#struct_name>(cx.__plugin_state());
                     let event = cx.event;
                     let adapter = cx.adapter;
                     let app_ctx = cx.app_ctx;
                     let telemetry = cx.telemetry;
                     Box::pin(async move {
                         let plugin = lock.read().await;
-                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
+                        let ctx = #runtime::Context::new(event, adapter, app_ctx, telemetry);
                         plugin.#method_name(ctx).await
                     })
                 })
@@ -257,13 +280,13 @@ fn gen_message_handler(
         }
         ReceiverKind::None | ReceiverKind::Owned => {
             quote! {
-                std::sync::Arc::new(move |cx: fish_plugin_sdk::HandlerContext| {
+                std::sync::Arc::new(move |cx: #runtime::HandlerContext| {
                     let event = cx.event;
                     let adapter = cx.adapter;
                     let app_ctx = cx.app_ctx;
                     let telemetry = cx.telemetry;
                     Box::pin(async move {
-                        let ctx = fish_plugin_sdk::Context::new(event, adapter, app_ctx, telemetry);
+                        let ctx = #runtime::Context::new(event, adapter, app_ctx, telemetry);
                         #struct_name::#method_name(ctx).await
                     })
                 })
@@ -274,24 +297,25 @@ fn gen_message_handler(
     let kind = cmd.kind.as_deref().unwrap_or("exact");
     match kind {
         "prefix" => {
-            quote! { fish_plugin_sdk::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
         }
         "regex" => {
-            quote! { fish_plugin_sdk::MessageHandler::regex(#hid, #pattern, #closure_body) }
+            quote! { #runtime::MessageHandler::regex(#hid, #pattern, #closure_body) }
         }
         "fallback" => {
-            quote! { fish_plugin_sdk::MessageHandler::fallback(#hid, #closure_body) }
+            quote! { #runtime::MessageHandler::fallback(#hid, #closure_body) }
         }
         _ if is_keyword => {
-            quote! { fish_plugin_sdk::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
         }
         _ => {
-            quote! { fish_plugin_sdk::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
         }
     }
 }
 
 fn gen_event_handler(
+    runtime: &proc_macro2::TokenStream,
     struct_name: &syn::Type,
     handler_id: &str,
     evt: &EventHandlerData,
@@ -304,15 +328,11 @@ fn gen_event_handler(
     let closure_body = match receiver {
         ReceiverKind::MutRef => {
             quote! {
-                let plugin_state = plugin_state
-                    .expect("stateful plugin: plugin_state is None");
                 Box::pin(async move {
-                    let lock = plugin_state
-                        .downcast::<tokio::sync::RwLock<#struct_name>>()
-                        .expect("plugin_state type mismatch");
+                    let lock = #runtime::__state_lock_tokio::<#struct_name>(cx.__plugin_state());
                     let mut plugin = lock.write().await;
-                    let ctx = fish_plugin_sdk::Context::new_from_event(
-                        event, adapter, ctx,
+                    let ctx = #runtime::Context::new_from_event(
+                        cx.event, cx.adapter, cx.app_ctx,
                     );
                     plugin.#method_name(ctx).await
                 })
@@ -320,15 +340,11 @@ fn gen_event_handler(
         }
         ReceiverKind::Ref => {
             quote! {
-                let plugin_state = plugin_state
-                    .expect("stateful plugin: plugin_state is None");
                 Box::pin(async move {
-                    let lock = plugin_state
-                        .downcast::<tokio::sync::RwLock<#struct_name>>()
-                        .expect("plugin_state type mismatch");
+                    let lock = #runtime::__state_lock_tokio::<#struct_name>(cx.__plugin_state());
                     let plugin = lock.read().await;
-                    let ctx = fish_plugin_sdk::Context::new_from_event(
-                        event, adapter, ctx,
+                    let ctx = #runtime::Context::new_from_event(
+                        cx.event, cx.adapter, cx.app_ctx,
                     );
                     plugin.#method_name(ctx).await
                 })
@@ -337,8 +353,8 @@ fn gen_event_handler(
         ReceiverKind::None | ReceiverKind::Owned => {
             quote! {
                 Box::pin(async move {
-                    let ctx = fish_plugin_sdk::Context::new_from_event(
-                        event, adapter, ctx,
+                    let ctx = #runtime::Context::new_from_event(
+                        cx.event, cx.adapter, cx.app_ctx,
                     );
                     #struct_name::#method_name(ctx).await
                 })
@@ -350,12 +366,9 @@ fn gen_event_handler(
         map.insert(
             String::from(#event_type),
             vec![
-                fish_plugin_sdk::EventHandler::new(
+                #runtime::EventHandler::new(
                     #hid,
-                    std::sync::Arc::new(move |event: std::sync::Arc<fish_plugin_sdk::SystemEvent>,
-                                          adapter: std::sync::Arc<dyn fish_plugin_sdk::BaseAdapter>,
-                                          ctx: std::sync::Arc<fish_plugin_sdk::Ctx>,
-                                          plugin_state: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>|
+                    std::sync::Arc::new(move |cx: #runtime::EventHandlerContext|
                     { #closure_body }),
                 ),
             ],
@@ -398,7 +411,10 @@ fn parse_command_attr(attr: &syn::Attribute) -> syn::Result<MessageHandlerData> 
         }
 
         if !input.peek(Ident) {
-            return Err(syn::Error::new(input.span(), "expected pattern string or `fallback`"));
+            return Err(syn::Error::new(
+                input.span(),
+                "expected pattern string or `fallback`",
+            ));
         }
 
         // #[command(fallback)] or #[command(pattern = "...", kind = "regex")]
@@ -449,7 +465,10 @@ fn parse_message_attr(attr: &syn::Attribute) -> syn::Result<MessageHandlerData> 
             }
         }
         if keyword.is_empty() {
-            return Err(syn::Error::new(input.span(), "#[message(...)] requires `keyword`"));
+            return Err(syn::Error::new(
+                input.span(),
+                "#[message(...)] requires `keyword`",
+            ));
         }
         Ok(MessageHandlerData {
             pattern_value: keyword,
@@ -527,7 +546,12 @@ impl Parse for PluginMeta {
                 "description" => meta.description = s,
                 "author" => meta.author = s,
                 "init" => meta.init = Some(s),
-                _ => return Err(syn::Error::new(key.span(), format!("unknown plugin metadata key: {}", key))),
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown plugin metadata key: {}", key),
+                    ));
+                }
             }
             if !input.is_empty() {
                 let _: Token![,] = input.parse()?;

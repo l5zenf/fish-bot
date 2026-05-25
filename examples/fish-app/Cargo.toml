@@ -1,0 +1,12 @@
+[package]
+name = "fish-example-fish-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fish-runtime = { workspace = true }
+tokio = { workspace = true }
+kameo = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
