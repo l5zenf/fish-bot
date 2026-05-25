@@ -21,7 +21,7 @@ use self::task_runner::{TaskFuture, TaskScheduler};
 /// Each plugin runs in its own kameo actor task with automatic panic recovery.
 /// Concurrency and queueing are delegated to an internal scheduler.
 #[derive(Actor)]
-pub struct PluginActor {
+pub(crate) struct PluginActor {
     plugin: Arc<dyn Plugin>,
     /// Handler id → index into plugin.message_handlers() for O(1) lookup.
     handler_index: std::collections::HashMap<String, usize>,
@@ -32,21 +32,21 @@ pub struct PluginActor {
 
 impl PluginActor {
     /// Create a new PluginActor, reading `RuntimeConfig` from the plugin itself.
-    pub fn new(plugin: Arc<dyn Plugin>) -> Self {
+    pub(crate) fn new(plugin: Arc<dyn Plugin>) -> Self {
         let config = plugin.runtime_config();
         Self::with_runtime(plugin, config)
     }
 
     /// Create a PluginActor with an explicit queue strategy (other config from plugin default).
     #[allow(dead_code)]
-    pub fn with_strategy(plugin: Arc<dyn Plugin>, strategy: QueueStrategy) -> Self {
+    pub(crate) fn with_strategy(plugin: Arc<dyn Plugin>, strategy: QueueStrategy) -> Self {
         let mut config = plugin.runtime_config();
         config.queue_strategy = strategy;
         Self::with_runtime(plugin, config)
     }
 
     /// Create a PluginActor with a full explicit runtime configuration.
-    pub fn with_runtime(plugin: Arc<dyn Plugin>, config: RuntimeConfig) -> Self {
+    pub(crate) fn with_runtime(plugin: Arc<dyn Plugin>, config: RuntimeConfig) -> Self {
         let handler_index = plugin
             .message_handlers()
             .iter()
@@ -65,12 +65,12 @@ impl PluginActor {
     }
 
     /// Accessor for the wrapped plugin definition.
-    pub fn plugin(&self) -> &Arc<dyn Plugin> {
+    pub(crate) fn plugin(&self) -> &Arc<dyn Plugin> {
         &self.plugin
     }
 
     /// Accessor for the precomputed handler lookup table.
-    pub fn handler_index(&self) -> &std::collections::HashMap<String, usize> {
+    pub(crate) fn handler_index(&self) -> &std::collections::HashMap<String, usize> {
         &self.handler_index
     }
 
@@ -126,7 +126,7 @@ impl PluginActor {
     }
 }
 
-pub struct HandleEvent {
+pub(crate) struct HandleEvent {
     pub event: MessageEvent,
     pub adapter: Arc<dyn BaseAdapter>,
     pub ctx: Arc<Ctx>,
@@ -186,7 +186,7 @@ impl Message<HandleEvent> for PluginActor {
     }
 }
 
-pub struct HandleSystemEvent {
+pub(crate) struct HandleSystemEvent {
     pub event: Arc<SystemEvent>,
     pub adapter: Arc<dyn BaseAdapter>,
     pub ctx: Arc<Ctx>,

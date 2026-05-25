@@ -1,5 +1,5 @@
-use fish_runtime::plugin;
-use fish_runtime::prelude::*;
+use fish_rt_adapter::plugin;
+use fish_rt_adapter::prelude::*;
 
 pub struct EchoPlugin;
 

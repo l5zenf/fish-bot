@@ -8,6 +8,7 @@ publish = false
 fish-core = { workspace = true }
 fish-runtime = { workspace = true }
 fish-rt-adapter = { workspace = true }
+tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

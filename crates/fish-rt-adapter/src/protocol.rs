@@ -5,7 +5,7 @@ use fish_core::error::Result;
 use fish_core::message::MessageSegment;
 
 /// Encode a MessageSegment to fish protocol JSON Value, returning (payload, content_type).
-pub fn encode_message(msg: &MessageSegment) -> Result<(Value, i64)> {
+pub(crate) fn encode_message(msg: &MessageSegment) -> Result<(Value, i64)> {
     match msg {
         MessageSegment::Text { text } => Ok((
             serde_json::json!({"contentType": 1, "text": {"text": text}}),
@@ -47,7 +47,7 @@ pub fn encode_message(msg: &MessageSegment) -> Result<(Value, i64)> {
 }
 
 /// Encode a whole MessageChain for sending (wraps segments in CustomNode if multiple).
-pub fn encode_chain(chain: &[MessageSegment]) -> Result<(Value, i64)> {
+pub(crate) fn encode_chain(chain: &[MessageSegment]) -> Result<(Value, i64)> {
     if chain.len() == 1 {
         return encode_message(&chain[0]);
     }
@@ -79,7 +79,7 @@ pub fn encode_chain(chain: &[MessageSegment]) -> Result<(Value, i64)> {
 }
 
 /// Decode a fish protocol JSON payload into a MessageSegment.
-pub fn decode_message(payload: &Value) -> Result<MessageSegment> {
+pub(crate) fn decode_message(payload: &Value) -> Result<MessageSegment> {
     let ct = payload
         .get("contentType")
         .and_then(|v| v.as_i64())
@@ -168,7 +168,7 @@ pub fn decode_message(payload: &Value) -> Result<MessageSegment> {
 }
 
 /// Parse raw fish protocol body into a Vec<MessageSegment>.
-pub fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
+pub(crate) fn decode_content(payload: &Value) -> Result<Vec<MessageSegment>> {
     // Check if this is a structured content object with contentType
     if payload.get("contentType").is_some() {
         return Ok(vec![decode_message(payload)?]);

@@ -14,7 +14,6 @@ mod runtime;
 pub use builder::ActorPluginBuilder;
 pub use bus::ActorBusHandle;
 pub use context::{EventContext, MessageContext};
-pub use fish_rt_adapter::FishWebSocketAdapter;
 pub use host::RuntimeHost;
 pub use plugin::Plugin;
 pub use runtime::QueueStrategy;

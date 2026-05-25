@@ -13,17 +13,17 @@ use tokio::time::{Duration, sleep};
 use urlencoding;
 
 /// Fish API client wrapping the MTOP (Mobile Taobao Open Platform) protocol.
-pub struct FishAPI {
+pub(crate) struct FishAPI {
     client: reqwest::Client,
     auth: AuthManager,
     device_id: String,
     /// Login form params for QR code flow, shared between gen and poll.
-    pub poll_params: Mutex<Option<HashMap<String, String>>>,
+    poll_params: Mutex<Option<HashMap<String, String>>>,
 }
 
 #[allow(dead_code)]
 impl FishAPI {
-    pub fn new(auth: AuthManager) -> Self {
+    pub(crate) fn new(auth: AuthManager) -> Self {
         let device_id = generate_device_id("");
         Self {
             client: reqwest::Client::builder()
@@ -64,26 +64,26 @@ impl FishAPI {
         }
     }
 
-    pub fn device_id(&self) -> String {
+    pub(crate) fn device_id(&self) -> String {
         self.device_id.clone()
     }
 
-    pub async fn cookies_str(&self) -> String {
+    pub(crate) async fn cookies_str(&self) -> String {
         self.auth.cookie_header().await
     }
 
-    pub async fn my_id(&self) -> String {
+    pub(crate) async fn my_id(&self) -> String {
         self.auth.my_id().await
     }
 
-    pub fn auth(&self) -> &AuthManager {
+    pub(crate) fn auth(&self) -> &AuthManager {
         &self.auth
     }
 
     // ---- Core MTOP call ----
 
     /// Make an MTOP API call with full sign and cookie handling.
-    pub async fn call_mtop(
+    pub(crate) async fn call_mtop(
         &self,
         api: &str,
         version: &str,
@@ -169,7 +169,7 @@ impl FishAPI {
     }
 
     /// Extract and persist cookies from a response's Set-Cookie headers.
-    pub async fn save_cookies_from_response(&self, response: &reqwest::Response) {
+    pub(crate) async fn save_cookies_from_response(&self, response: &reqwest::Response) {
         let mut cookie_updated = false;
         let mut cookies = self.auth.cookies.lock().await;
 
@@ -201,7 +201,7 @@ impl FishAPI {
     // ---- Auth APIs ----
 
     /// Get token (first step of access token acquisition).
-    pub async fn get_token(&self) -> Result<Value> {
+    pub(crate) async fn get_token(&self) -> Result<Value> {
         let data = serde_json::json!({
             "appKey": "444e9908a51d1cb236a27862abc769c9",
             "deviceId": self.device_id,
@@ -725,7 +725,7 @@ impl Clone for FishAPI {
 
 
 /// Simple URL encoder for form bodies.
-pub fn percent_encode(input: &str) -> String {
+fn percent_encode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {

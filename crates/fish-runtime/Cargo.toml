@@ -7,7 +7,6 @@ description = "Plugin runtime for fish"
 [dependencies]
 fish-core = { workspace = true }
 fish-plugin-macros = { workspace = true }
-fish-rt-adapter = { workspace = true }
 kameo = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

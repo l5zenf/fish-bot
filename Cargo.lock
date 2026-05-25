@@ -331,6 +331,7 @@ dependencies = [
  "fish-rt-adapter",
  "fish-runtime",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -354,7 +355,6 @@ name = "fish-example-fish-app"
 version = "0.1.0"
 dependencies = [
  "fish-rt-adapter",
- "fish-runtime",
  "kameo",
  "tokio",
  "tracing",
@@ -394,6 +394,7 @@ dependencies = [
  "async-trait",
  "base64",
  "fish-core",
+ "fish-runtime",
  "futures",
  "md5",
  "mockall",
@@ -421,7 +422,6 @@ dependencies = [
  "async-trait",
  "fish-core",
  "fish-plugin-macros",
- "fish-rt-adapter",
  "kameo",
  "mockall",
  "parking_lot",

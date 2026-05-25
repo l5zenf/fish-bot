@@ -7,7 +7,7 @@ const APP_KEY: &str = "34839810";
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// MTOP h5 sign: md5(token&t&appKey&data).
-pub fn generate_sign(t: &str, token: &str, data: &str) -> Result<String> {
+pub(crate) fn generate_sign(t: &str, token: &str, data: &str) -> Result<String> {
     Ok(format!(
         "{:x}",
         md5::compute(format!("{token}&{t}&{APP_KEY}&{data}"))
@@ -15,7 +15,7 @@ pub fn generate_sign(t: &str, token: &str, data: &str) -> Result<String> {
 }
 
 /// Message ID for WebSocket frames: {rand_0..999}{timestamp_ms} 0
-pub fn generate_mid() -> String {
+pub(crate) fn generate_mid() -> String {
     format!(
         "{}{} 0",
         rand::thread_rng().gen_range(0..1000u32),
@@ -24,12 +24,12 @@ pub fn generate_mid() -> String {
 }
 
 /// UUID for WebSocket send: -{timestamp_ms}1
-pub fn generate_uuid() -> String {
+pub(crate) fn generate_uuid() -> String {
     format!("-{}1", epoch_ms())
 }
 
 /// Device fingerprint: UUIDv4-style (uppercase hex) with optional user-id suffix.
-pub fn generate_device_id(user_id: &str) -> String {
+pub(crate) fn generate_device_id(user_id: &str) -> String {
     let mut rng = rand::thread_rng();
     let hex: String = (0..30).map(|_| HEX[rng.gen_range(0..16)] as char).collect();
     let variant = HEX[(rng.gen_range(0..4) | 0x8) as usize] as char;
@@ -46,7 +46,7 @@ pub fn generate_device_id(user_id: &str) -> String {
 }
 
 /// Decrypt a base64-encoded message body to JSON.
-pub fn decrypt(b64_str: &str) -> Result<serde_json::Value> {
+pub(crate) fn decrypt(b64_str: &str) -> Result<serde_json::Value> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let decoded = STANDARD.decode(b64_str)?;
     Ok(serde_json::from_slice(&decoded)?)

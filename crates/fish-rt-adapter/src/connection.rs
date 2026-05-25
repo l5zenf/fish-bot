@@ -20,19 +20,19 @@ type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<Tc
 
 /// Raw WebSocket transport layer for the fish protocol.
 /// Handles connection, sending, handshake, and heartbeat.
-pub struct FishConnection {
+pub(crate) struct FishConnection {
     ws_writer: RwLock<Option<WsWriter>>,
 }
 
 impl FishConnection {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             ws_writer: RwLock::new(None),
         }
     }
 
     /// Send a serialized JSON value over the active WebSocket.
-    pub async fn send(&self, msg: &Value) -> Result<()> {
+    pub(crate) async fn send(&self, msg: &Value) -> Result<()> {
         let mut writer = self.ws_writer.write().await;
         match writer.as_mut() {
             Some(w) => {
@@ -47,7 +47,7 @@ impl FishConnection {
     }
 
     /// Open a WebSocket connection, split the stream, store the writer, return the reader.
-    pub async fn connect(&self, url: &str) -> Result<WsReader> {
+    pub(crate) async fn connect(&self, url: &str) -> Result<WsReader> {
         use tokio_tungstenite::connect_async;
         let (ws_stream, _) = connect_async(url)
             .await
@@ -59,7 +59,7 @@ impl FishConnection {
     }
 
     /// Perform the fish-specific WS handshake: /reg + sync ackDiff.
-    pub async fn handshake(&self, token: &str, device_id: &str) -> Result<()> {
+    pub(crate) async fn handshake(&self, token: &str, device_id: &str) -> Result<()> {
         let reg_msg = serde_json::json!({
             "lwp": "/reg",
             "headers": {
@@ -101,7 +101,7 @@ impl FishConnection {
 
     /// Spawn a background task that sends heartbeat frames every 15 seconds.
     /// Requires `self: &Arc<Self>` so the spawned task can hold its own reference.
-    pub fn spawn_heartbeat(self: &Arc<Self>) {
+    pub(crate) fn spawn_heartbeat(self: &Arc<Self>) {
         let hb_self = Arc::clone(self);
         tokio::spawn(async move {
             let mut ticker = interval(std::time::Duration::from_secs(15));

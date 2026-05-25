@@ -5,9 +5,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Manages fish authentication: token acquisition, refresh, and cookie persistence.
-pub struct AuthManager {
-    pub client: reqwest::Client,
-    pub cookies: Arc<Mutex<HashMap<String, String>>>,
+pub(crate) struct AuthManager {
+    client: reqwest::Client,
+    pub(crate) cookies: Arc<Mutex<HashMap<String, String>>>,
     device_id: String,
     data_dir: PathBuf,
 }
@@ -20,7 +20,7 @@ impl Default for AuthManager {
 
 #[allow(dead_code)]
 impl AuthManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let device_id = crate::sign::generate_device_id("");
 
         // Try loading from file first, then env var
@@ -76,7 +76,7 @@ impl AuthManager {
     }
 
     /// Save cookies to the local auth file.
-    pub async fn save_cookies_to_file(&self) {
+    pub(crate) async fn save_cookies_to_file(&self) {
         let path = self.auth_file_path();
         if let Some(parent) = path.parent()
             && !parent.exists()
@@ -100,7 +100,7 @@ impl AuthManager {
     }
 
     /// Remove the local auth file.
-    pub async fn rm_auth_file(&self) {
+    pub(crate) async fn rm_auth_file(&self) {
         let path = self.auth_file_path();
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {
@@ -126,16 +126,16 @@ impl AuthManager {
         }
     }
 
-    pub fn device_id(&self) -> String {
+    pub(crate) fn device_id(&self) -> String {
         self.device_id.clone()
     }
 
-    pub async fn get_cookies(&self) -> HashMap<String, String> {
+    pub(crate) async fn get_cookies(&self) -> HashMap<String, String> {
         self.cookies.lock().await.clone()
     }
 
     /// Build a cookie header string from current cookies.
-    pub async fn cookie_header(&self) -> String {
+    pub(crate) async fn cookie_header(&self) -> String {
         let cookies = self.cookies.lock().await;
         cookies
             .iter()
@@ -145,14 +145,14 @@ impl AuthManager {
     }
 
     /// Get the user's unb (user ID) from cookies.
-    pub async fn my_id(&self) -> String {
+    pub(crate) async fn my_id(&self) -> String {
         let cookies = self.cookies.lock().await;
         cookies.get("unb").cloned().unwrap_or_default()
     }
 
     /// Perform QR code login — returns the cookies dict.
     /// Delegates to FishAPI which handles the full QR flow (generate, display, poll).
-    pub async fn qrcode_login(&mut self) -> Result<HashMap<String, String>> {
+    pub(crate) async fn qrcode_login(&mut self) -> Result<HashMap<String, String>> {
         let api = super::api::FishAPI::new(self.clone());
         api.ensure_auth().await?;
         Ok(self.get_cookies().await)
@@ -172,7 +172,7 @@ impl AuthManager {
 
     /// Create AuthManager from local cookies. If no cookies found,
     /// call `qrcode_login()` to initiate QR login flow.
-    pub async fn from_local_or_qr_login() -> Result<Self> {
+    pub(crate) async fn from_local_or_qr_login() -> Result<Self> {
         let mut auth = Self::new();
         {
             let cookies = auth.cookies.lock().await;
@@ -184,7 +184,7 @@ impl AuthManager {
         Ok(auth)
     }
 
-    pub async fn refresh_if_needed(&mut self) -> Result<()> {
+    pub(crate) async fn refresh_if_needed(&mut self) -> Result<()> {
         Ok(())
     }
 }

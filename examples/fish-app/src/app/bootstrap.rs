@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use fish_rt_adapter::FishWebSocketAdapter;
-use fish_runtime::prelude::*;
-use fish_runtime::{BaseAdapter, RuntimeHost, Telemetry};
+use fish_rt_adapter::prelude::*;
+use fish_rt_adapter::{BaseAdapter, FishWebSocketAdapter, RuntimeHost, Telemetry};
 
 use super::plugin::EchoPlugin;
 

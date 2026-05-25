@@ -9,14 +9,18 @@ use syn::{
 // ---- Exported proc macros ----
 
 fn runtime_path() -> proc_macro2::TokenStream {
-    match crate_name("fish-runtime") {
-        Ok(FoundCrate::Itself) => quote!(crate),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
+    for crate_id in ["fish-rt-adapter", "fish-runtime"] {
+        match crate_name(crate_id) {
+            Ok(FoundCrate::Itself) => return quote!(crate),
+            Ok(FoundCrate::Name(name)) => {
+                let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+                return quote!(::#ident);
+            }
+            Err(_) => {}
         }
-        Err(_) => quote!(::fish_runtime),
     }
+
+    quote!(::fish_runtime)
 }
 
 fn extract_type_ident(ty: &Type) -> Option<Ident> {

@@ -25,6 +25,7 @@ pub enum RouteHint {
 }
 
 /// Context passed to every message handler execution.
+#[doc(hidden)]
 pub struct HandlerContext {
     pub event: MessageEvent,
     pub adapter: Arc<dyn BaseAdapter>,
@@ -33,6 +34,7 @@ pub struct HandlerContext {
     plugin_state: Option<PluginState>,
 }
 
+#[doc(hidden)]
 impl HandlerContext {
     pub(crate) fn __new(
         event: MessageEvent,
@@ -85,6 +87,7 @@ impl HandlerContext {
     }
 }
 
+#[doc(hidden)]
 pub struct EventHandlerContext {
     pub event: Arc<SystemEvent>,
     pub adapter: Arc<dyn BaseAdapter>,
@@ -93,6 +96,7 @@ pub struct EventHandlerContext {
     plugin_state: Option<PluginState>,
 }
 
+#[doc(hidden)]
 impl EventHandlerContext {
     pub(crate) fn __new(
         event: Arc<SystemEvent>,
@@ -130,9 +134,12 @@ impl EventHandlerContext {
     }
 }
 
+#[doc(hidden)]
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+#[doc(hidden)]
 pub type HandlerFunc = Arc<dyn Fn(HandlerContext) -> HandlerFuture + Send + Sync>;
 
+#[doc(hidden)]
 pub struct MessageHandler {
     pub id: String,
     pub route: RouteHint,
@@ -141,6 +148,7 @@ pub struct MessageHandler {
     pub func: HandlerFunc,
 }
 
+#[doc(hidden)]
 impl MessageHandler {
     pub fn new(
         id: impl Into<String>,
@@ -211,10 +219,13 @@ impl MessageHandler {
     }
 }
 
+#[doc(hidden)]
 pub type EventHandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+#[doc(hidden)]
 pub type EventHandlerFunc = Arc<dyn Fn(EventHandlerContext) -> EventHandlerFuture + Send + Sync>;
 
 #[derive(Clone)]
+#[doc(hidden)]
 pub struct EventHandler {
     pub event_type: String,
     pub id: String,
@@ -222,6 +233,7 @@ pub struct EventHandler {
     pub rule: Option<Rule>,
 }
 
+#[doc(hidden)]
 impl EventHandler {
     pub fn new(
         event_type: impl Into<String>,
