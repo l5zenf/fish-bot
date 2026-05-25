@@ -2,18 +2,21 @@
 name = "fish-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "Actor runtime for fish-bot plugins"
+description = "Plugin runtime for fish"
 
 [dependencies]
 fish-core = { workspace = true }
-fish-adapter = { workspace = true }
-fish-plugin = { workspace = true }
+fish-plugin-macros = { workspace = true }
 kameo = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+tempfile = "3"
+wiremock = "0.6"
+mockall = "0.14"

@@ -6,13 +6,22 @@ publish = false
 
 [dependencies]
 fish-core = { workspace = true }
-fish-adapter = { workspace = true }
+fish-runtime = { workspace = true }
+fish-rt-adapter = { workspace = true }
+tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 
 [workspace]
-members = ["crates/*"]
+members = [
+    "crates/fish-core",
+    "crates/fish-runtime",
+    "crates/fish-plugin-macros",
+    "crates/fish-rt-adapter",
+    "examples/quickstart-simple",
+    "examples/quickstart-custom",
+]
 resolver = "2"
 
 [workspace.dependencies]
@@ -47,11 +56,10 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 md5 = "0.7"
 rmp-serde = "1.3"
+clap = { version = "4.5", features = ["derive"] }
 
 # --- internal ---
 fish-core = { path = "crates/fish-core" }
-fish-adapter = { path = "crates/fish-adapter" }
-fish-plugin = { path = "crates/fish-plugin" }
 fish-runtime = { path = "crates/fish-runtime" }
-fish-plugin-sdk = { path = "crates/fish-plugin-sdk" }
 fish-plugin-macros = { path = "crates/fish-plugin-macros" }
+fish-rt-adapter = { path = "crates/fish-rt-adapter" }

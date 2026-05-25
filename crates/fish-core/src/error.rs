@@ -41,23 +41,33 @@ impl From<base64::DecodeError> for AppError {
 
 impl AppError {
     pub fn auth(details: impl Into<String>) -> Self {
-        AppError::Auth { details: details.into() }
+        AppError::Auth {
+            details: details.into(),
+        }
     }
 
     pub fn protocol(details: impl Into<String>) -> Self {
-        AppError::Protocol { details: details.into() }
+        AppError::Protocol {
+            details: details.into(),
+        }
     }
 
     pub fn http(message: impl Into<String>) -> Self {
-        AppError::Http { message: message.into() }
+        AppError::Http {
+            message: message.into(),
+        }
     }
 
     pub fn ws(message: impl Into<String>) -> Self {
-        AppError::Ws { message: message.into() }
+        AppError::Ws {
+            message: message.into(),
+        }
     }
 
     pub fn internal(details: impl Into<String>) -> Self {
-        AppError::Internal { details: details.into() }
+        AppError::Internal {
+            details: details.into(),
+        }
     }
 }
 
@@ -83,35 +93,76 @@ mod tests {
     #[test]
     fn t1_35_display_all_variants() {
         let cases: Vec<(AppError, &str)> = vec![
-            (AppError::Http { message: "timeout".into() }, "HTTP request failed: timeout"),
-            (AppError::Ws { message: "closed".into() }, "WebSocket error: closed"),
-            (AppError::Json { source: serde_json::from_str::<()>("invalid").unwrap_err() },
-             "JSON error:"),
-            (AppError::Base64 { source: base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err() },
-             "Base64 decode error:"),
-            (AppError::Auth { details: "bad token".into() }, "Authentication failed: bad token"),
-            (AppError::Protocol { details: "bad msg".into() }, "Protocol error: bad msg"),
-            (AppError::Internal { details: "oops".into() }, "Internal error: oops"),
+            (
+                AppError::Http {
+                    message: "timeout".into(),
+                },
+                "HTTP request failed: timeout",
+            ),
+            (
+                AppError::Ws {
+                    message: "closed".into(),
+                },
+                "WebSocket error: closed",
+            ),
+            (
+                AppError::Json {
+                    source: serde_json::from_str::<()>("invalid").unwrap_err(),
+                },
+                "JSON error:",
+            ),
+            (
+                AppError::Base64 {
+                    source: base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        "!!!",
+                    )
+                    .unwrap_err(),
+                },
+                "Base64 decode error:",
+            ),
+            (
+                AppError::Auth {
+                    details: "bad token".into(),
+                },
+                "Authentication failed: bad token",
+            ),
+            (
+                AppError::Protocol {
+                    details: "bad msg".into(),
+                },
+                "Protocol error: bad msg",
+            ),
+            (
+                AppError::Internal {
+                    details: "oops".into(),
+                },
+                "Internal error: oops",
+            ),
         ];
 
         for (err, expected_prefix) in cases {
             let display = err.to_string();
-            assert!(display.starts_with(expected_prefix),
-                "expected '{display}' to start with '{expected_prefix}'");
+            assert!(
+                display.starts_with(expected_prefix),
+                "expected '{display}' to start with '{expected_prefix}'"
+            );
         }
     }
 
     #[test]
     fn t1_36_from_serde_json_error() {
-        let result: std::result::Result<(), AppError> =
-            Err(Into::into(serde_json::from_str::<()>("invalid").unwrap_err()));
+        let result: std::result::Result<(), AppError> = Err(Into::into(
+            serde_json::from_str::<()>("invalid").unwrap_err(),
+        ));
         assert!(matches!(result, Err(AppError::Json { .. })));
     }
 
     #[test]
     fn t1_37_from_base64_error() {
-        let result: std::result::Result<(), AppError> =
-            Err(Into::into(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err()));
+        let result: std::result::Result<(), AppError> = Err(Into::into(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "!!!").unwrap_err(),
+        ));
         assert!(matches!(result, Err(AppError::Base64 { .. })));
     }
 

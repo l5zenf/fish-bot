@@ -31,9 +31,7 @@ pub enum MessageSegment {
 
 impl MessageSegment {
     pub fn text(text: impl Into<String>) -> Self {
-        MessageSegment::Text {
-            text: text.into(),
-        }
+        MessageSegment::Text { text: text.into() }
     }
 
     pub fn image(image_url: impl Into<String>) -> Self {
@@ -222,13 +220,17 @@ mod tests {
     #[test]
     fn t1_2_image_construction_and_serde() -> anyhow::Result<()> {
         let seg = MessageSegment::image("https://example.com/pic.jpg");
-        assert!(matches!(seg, MessageSegment::Image { ref image_url, width: 0, height: 0 }
-            if image_url == "https://example.com/pic.jpg"));
+        assert!(
+            matches!(seg, MessageSegment::Image { ref image_url, width: 0, height: 0 }
+            if image_url == "https://example.com/pic.jpg")
+        );
 
         let json = serde_json::to_string(&seg)?;
         let deser: MessageSegment = serde_json::from_str(&json)?;
-        assert!(matches!(deser, MessageSegment::Image { ref image_url, width: 0, height: 0 }
-            if image_url == "https://example.com/pic.jpg"));
+        assert!(
+            matches!(deser, MessageSegment::Image { ref image_url, width: 0, height: 0 }
+            if image_url == "https://example.com/pic.jpg")
+        );
         Ok(())
     }
 
@@ -238,8 +240,10 @@ mod tests {
             audio_url: "https://example.com/audio.mp3".into(),
             duration_ms: 5000,
         };
-        assert!(matches!(&audio, MessageSegment::Audio { audio_url, duration_ms: 5000 }
-            if audio_url == "https://example.com/audio.mp3"));
+        assert!(
+            matches!(&audio, MessageSegment::Audio { audio_url, duration_ms: 5000 }
+            if audio_url == "https://example.com/audio.mp3")
+        );
 
         let custom = MessageSegment::CustomNode {
             desc: "test".into(),
@@ -260,15 +264,27 @@ mod tests {
         assert_eq!(MessageSegment::text("hi").desc(), "文本");
         assert_eq!(MessageSegment::image("url").desc(), "图片");
         assert_eq!(
-            MessageSegment::Audio { audio_url: "url".into(), duration_ms: 0 }.desc(),
+            MessageSegment::Audio {
+                audio_url: "url".into(),
+                duration_ms: 0
+            }
+            .desc(),
             "音频"
         );
         assert_eq!(
-            MessageSegment::CustomNode { desc: "".into(), content: serde_json::json!({}) }.desc(),
+            MessageSegment::CustomNode {
+                desc: "".into(),
+                content: serde_json::json!({})
+            }
+            .desc(),
             "节点消息"
         );
         assert_eq!(
-            MessageSegment::CustomNode { desc: "卡片".into(), content: serde_json::json!({}) }.desc(),
+            MessageSegment::CustomNode {
+                desc: "卡片".into(),
+                content: serde_json::json!({})
+            }
+            .desc(),
             "卡片"
         );
     }
@@ -278,11 +294,19 @@ mod tests {
         assert_eq!(MessageSegment::text("hello").summary(), "hello");
         assert_eq!(MessageSegment::image("url").summary(), "[图片]");
         assert_eq!(
-            MessageSegment::Audio { audio_url: "url".into(), duration_ms: 0 }.summary(),
+            MessageSegment::Audio {
+                audio_url: "url".into(),
+                duration_ms: 0
+            }
+            .summary(),
             "[音频]"
         );
         assert_eq!(
-            MessageSegment::CustomNode { desc: "test".into(), content: serde_json::json!({}) }.summary(),
+            MessageSegment::CustomNode {
+                desc: "test".into(),
+                content: serde_json::json!({})
+            }
+            .summary(),
             "[test]"
         );
     }
@@ -376,10 +400,7 @@ mod tests {
         assert!(chain.has_image());
 
         // Vec<MessageSegment> -> MessageChain
-        let chain: MessageChain = vec![
-            MessageSegment::text("a"),
-            MessageSegment::text("b"),
-        ].into();
+        let chain: MessageChain = vec![MessageSegment::text("a"), MessageSegment::text("b")].into();
         assert_eq!(chain.plain_text(), "ab");
     }
 

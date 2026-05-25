@@ -1,11 +1,7 @@
-use fish_core::message::MessageSegment;
-use fish_adapter::fish::protocol::{encode_message, decode_message};
+use fish_runtime::{MessageChain, MessageSegment};
 
 #[test]
-fn test_text_encode_decode() -> anyhow::Result<()> {
-    let msg = MessageSegment::Text { text: "hello".to_string() };
-    let (encoded, _) = encode_message(&msg)?;
-    let decoded = decode_message(&encoded)?;
-    assert!(matches!(decoded, MessageSegment::Text { text } if text == "hello"));
-    Ok(())
+fn test_message_chain_summary() {
+    let chain = MessageChain::from(MessageSegment::text("hello"));
+    assert_eq!(chain.summary(), "hello");
 }

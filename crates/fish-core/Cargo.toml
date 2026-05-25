@@ -2,9 +2,10 @@
 name = "fish-core"
 version = "0.1.0"
 edition = "2024"
-description = "Core types for fish-bot: message, event, rule, ctx, error, logger"
+description = "Core types for fish runtime"
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 snafu = { workspace = true }

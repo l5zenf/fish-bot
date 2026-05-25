@@ -1,6 +1,4 @@
-use crate::message::{MessageChain, MessageSegment};
-use std::future::Future;
-use std::pin::Pin;
+use crate::message::MessageChain;
 use std::sync::Arc;
 
 /// A system-level event (non-chat-message) received from the WebSocket.
@@ -20,8 +18,6 @@ impl SystemEvent {
     }
 }
 
-type ReplyFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-
 /// Message event context.
 #[derive(Clone)]
 pub struct MessageEvent {
@@ -30,7 +26,6 @@ pub struct MessageEvent {
     pub sender_name: String,
     pub messages: MessageChain,
     pub raw_payload: Arc<serde_json::Value>,
-    callback_func: Option<std::sync::Arc<dyn Fn(MessageSegment) -> ReplyFuture + Send + Sync>>,
 }
 
 impl MessageEvent {
@@ -47,21 +42,6 @@ impl MessageEvent {
             sender_name,
             messages,
             raw_payload: Arc::new(raw_payload),
-            callback_func: None,
-        }
-    }
-
-    pub fn set_callback(
-        &mut self,
-        cb: impl Fn(MessageSegment) -> ReplyFuture + Send + Sync + 'static,
-    ) {
-        self.callback_func = Some(std::sync::Arc::new(cb));
-    }
-
-    /// Reply to this message event — sends a message back to the sender.
-    pub async fn reply(&self, msg: impl Into<MessageSegment>) {
-        if let Some(ref cb) = self.callback_func {
-            cb(msg.into()).await;
         }
     }
 
@@ -96,7 +76,6 @@ impl std::fmt::Debug for MessageEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageSegment;
 
     #[test]
     fn t1_14_event_new_all_fields() {
@@ -115,57 +94,20 @@ mod tests {
         assert_eq!(event.sender_name, "Alice");
         assert_eq!(event.messages.plain_text(), "hello");
         assert_eq!(*event.raw_payload, raw);
-        assert!(event.callback_func.is_none());
-    }
-
-    #[tokio::test]
-    async fn t1_15_set_callback_and_reply() {
-        use std::sync::Arc;
-
-        let callback_called = Arc::new(parking_lot::Mutex::new(String::new()));
-        let mut event = MessageEvent::new(
-            "cid1".into(),
-            "uid1".into(),
-            "Alice".into(),
-            MessageChain::from("hello"),
-            serde_json::json!({}),
-        );
-
-        let captured = Arc::clone(&callback_called);
-        event.set_callback(move |seg: MessageSegment| {
-            let c = Arc::clone(&captured);
-            Box::pin(async move {
-                let mut lock = c.lock();
-                *lock = seg.summary();
-            })
-        });
-
-        event.reply(MessageSegment::text("pong")).await;
-        assert_eq!(*callback_called.lock(), "pong");
-    }
-
-    #[tokio::test]
-    async fn t1_16_reply_without_callback_silent() {
-        let event = MessageEvent::new(
-            "cid1".into(),
-            "uid1".into(),
-            "Alice".into(),
-            MessageChain::from("hello"),
-            serde_json::json!({}),
-        );
-
-        // Should not panic or error
-        event.reply(MessageSegment::text("pong")).await;
     }
 
     #[test]
-    fn t1_17_event_delegates_to_chain() {
+    fn t1_15_event_delegates_to_chain() {
         let mut chain = MessageChain::new();
-        chain.append(MessageSegment::text("hello"));
-        chain.append(MessageSegment::image("pic.jpg"));
+        chain.append(crate::message::MessageSegment::text("hello"));
+        chain.append(crate::message::MessageSegment::image("pic.jpg"));
 
         let event = MessageEvent::new(
-            "cid".into(), "uid".into(), "Alice".into(), chain, serde_json::json!({}),
+            "cid".into(),
+            "uid".into(),
+            "Alice".into(),
+            chain,
+            serde_json::json!({}),
         );
 
         assert_eq!(event.plain_text(), "hello");
@@ -174,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn t1_18_debug_no_callback_info() {
+    fn t1_16_debug_stays_data_only() {
         let event = MessageEvent::new(
             "cid".into(),
             "uid".into(),
@@ -186,7 +128,5 @@ mod tests {
         let debug_str = format!("{:?}", event);
         assert!(debug_str.contains("cid"));
         assert!(debug_str.contains("Alice"));
-        assert!(!debug_str.contains("callback_func"));
-        assert!(!debug_str.contains("callback"));
     }
 }

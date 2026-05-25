@@ -104,12 +104,24 @@ impl Telemetry {
         let s = self.snapshot();
         tracing::info!(
             "Telemetry: msg_rcv={} exact={} prefix={} keyword={} fallback={} dispatch={} unmatched={} reply_err={} started={} ok={} err={} timeout={} drop_newest={} enqueue={} drop_oldest={} q_ok={} q_err={} q_timeout={}",
-            s.messages_received, s.exact_route_hits, s.prefix_route_hits,
-            s.keyword_route_hits, s.fallback_dispatches, s.handler_dispatches,
-            s.unmatched_messages, s.reply_failures,
-            s.handler_started, s.handler_succeeded, s.handler_failed, s.handler_timed_out,
-            s.drop_newest_drops, s.drop_oldest_enqueues, s.drop_oldest_oldest_discards,
-            s.queued_handler_succeeded, s.queued_handler_failed, s.queued_handler_timed_out,
+            s.messages_received,
+            s.exact_route_hits,
+            s.prefix_route_hits,
+            s.keyword_route_hits,
+            s.fallback_dispatches,
+            s.handler_dispatches,
+            s.unmatched_messages,
+            s.reply_failures,
+            s.handler_started,
+            s.handler_succeeded,
+            s.handler_failed,
+            s.handler_timed_out,
+            s.drop_newest_drops,
+            s.drop_oldest_enqueues,
+            s.drop_oldest_oldest_discards,
+            s.queued_handler_succeeded,
+            s.queued_handler_failed,
+            s.queued_handler_timed_out,
         );
     }
 }

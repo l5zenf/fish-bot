@@ -2,7 +2,7 @@
 name = "fish-plugin-macros"
 version = "0.1.0"
 edition = "2024"
-description = "Proc macros for fish-bot plugins"
+description = "Proc macros for fish runtime plugins"
 
 [lib]
 proc-macro = true
@@ -11,3 +11,4 @@ proc-macro = true
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
+proc-macro-crate = "3"
