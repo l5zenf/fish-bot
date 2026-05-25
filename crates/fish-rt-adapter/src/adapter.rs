@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fish_core::AdapterEventSink;
-use fish_core::error::Result;
-use fish_core::event::{MessageEvent, SystemEvent};
+use fish_core::error::{AppError, Result};
+use fish_core::event::MessageEvent;
 use fish_core::message::{MessageChain, MessageSegment};
 use futures::StreamExt;
 use futures::stream::SplitStream;
@@ -17,28 +17,53 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use super::api::FishAPI;
 use super::auth::AuthManager;
 use super::connection::FishConnection;
-use super::protocol::{decode_content, encode_chain};
-use super::sign::{decrypt, generate_mid, generate_uuid};
+use super::sign::{
+    decode_python_like_msgpack, decode_python_like_payload, generate_mid, generate_uuid,
+};
 use fish_core::BaseAdapter;
 
 type WsReader = SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-fn decode_sync_payload(raw_data: &str) -> Option<Value> {
-    if decrypt(raw_data).is_ok() {
-        return None;
-    }
-    let decoded = STANDARD.decode(raw_data.as_bytes()).ok()?;
-    rmp_serde::from_slice::<Value>(&decoded).ok()
+fn summarize_ws_payload(text: &str) -> String {
+    let compact = text.replace('\n', " ");
+    compact.chars().take(240).collect()
 }
 
-fn should_fallback_to_reminder_content(segments: &[MessageSegment]) -> bool {
-    !segments.is_empty()
-        && segments.iter().all(|segment| {
-            matches!(
-                segment,
-                MessageSegment::CustomNode { desc, .. } if desc.is_empty()
-            )
-        })
+#[derive(Debug, Clone, PartialEq)]
+enum DecodedSyncPayload {
+    PlainJson(Value),
+    Message(Value),
+    Unsupported(&'static str),
+}
+
+fn decode_sync_payload(raw_data: &str) -> DecodedSyncPayload {
+    let decoded = match decode_python_like_payload(raw_data) {
+        Ok(decoded) => decoded,
+        Err(_) => return DecodedSyncPayload::Unsupported("base64_decode_failed"),
+    };
+
+    if let Ok(value) = serde_json::from_slice::<Value>(&decoded) {
+        return DecodedSyncPayload::PlainJson(value);
+    }
+
+    if let Some(value) = decode_python_like_msgpack(&decoded) {
+        return DecodedSyncPayload::Message(value);
+    }
+
+    DecodedSyncPayload::Unsupported("unknown_sync_payload")
+}
+
+fn summarize_json_shape(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let keys = map.keys().take(6).cloned().collect::<Vec<_>>().join(",");
+            format!("object keys=[{keys}]")
+        }
+        Value::Array(items) => format!("array len={}", items.len()),
+        Value::String(text) => format!("string {}", summarize_ws_payload(text)),
+        Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn is_chat_message(payload: &Value) -> bool {
@@ -63,7 +88,20 @@ fn build_send_message(
     cid: Option<&str>,
     my_id: &str,
 ) -> Result<Value> {
-    let (payload, custom_type) = encode_chain(message.segments())?;
+    let text = match message.segments() {
+        [MessageSegment::Text { text }] => text.clone(),
+        _ => {
+            return Err(AppError::protocol(
+                "python reference protocol only supports plain text outbound messages",
+            ));
+        }
+    };
+    let payload = serde_json::json!({
+        "contentType": 1,
+        "text": {
+            "text": text
+        }
+    });
     let encoded_data = STANDARD.encode(serde_json::to_string(&payload)?.as_bytes());
     let cid = cid.unwrap_or(target_id);
 
@@ -77,7 +115,7 @@ fn build_send_message(
                 "conversationType": 1,
                 "content": {
                     "contentType": 101,
-                    "custom": { "type": custom_type, "data": encoded_data }
+                    "custom": { "type": 1, "data": encoded_data }
                 },
                 "redPointPolicy": 0,
                 "extension": { "extJson": "{}" },
@@ -111,12 +149,18 @@ impl FishWebSocketAdapter {
         let url = "wss://wss-goofish.dingtalk.com/";
         tracing::info!("Connecting to {}", url);
 
-        let reader = self.conn.connect(url).await?;
+        let cookie_header = self.api.cookie_header().await;
+        tracing::info!(
+            "Connecting with websocket cookie header ({} chars)",
+            cookie_header.len()
+        );
+        let reader = self.conn.connect(url, &cookie_header).await?;
 
         let token = self.api.get_access_token().await?;
         tracing::info!("Got access token");
 
         self.conn.handshake(&token, &self.api.device_id()).await?;
+        tracing::info!("WebSocket handshake sent");
         self.conn.spawn_heartbeat();
 
         self.receive_loop(reader, sink).await
@@ -131,16 +175,36 @@ impl FishWebSocketAdapter {
         while let Some(msg_result) = reader.next().await {
             let text = match msg_result {
                 Ok(WsMessage::Text(t)) => t,
+                Ok(WsMessage::Binary(bytes)) => {
+                    tracing::info!("WS recv binary frame ({} bytes)", bytes.len());
+                    match String::from_utf8(bytes.to_vec()) {
+                        Ok(text) => text.into(),
+                        Err(_) => {
+                            tracing::warn!("WS binary frame is not valid UTF-8 JSON; skipped");
+                            continue;
+                        }
+                    }
+                }
                 Ok(WsMessage::Close(frame)) => {
                     tracing::info!("WS closed: {:?}", frame);
                     break;
                 }
-                Ok(_) => continue,
+                Ok(WsMessage::Ping(_)) => {
+                    tracing::debug!("WS recv ping");
+                    continue;
+                }
+                Ok(WsMessage::Pong(_)) => {
+                    tracing::debug!("WS recv pong");
+                    continue;
+                }
+                Ok(WsMessage::Frame(_)) => continue,
                 Err(e) => {
                     tracing::error!("WS recv error: {}", e);
                     break;
                 }
             };
+
+            tracing::info!("WS recv frame: {}", summarize_ws_payload(&text));
             if let Err(e) = self.handle_raw_message(&text, Arc::clone(&sink)).await {
                 tracing::error!("handle_raw_message: {}", e);
             }
@@ -155,6 +219,11 @@ impl FishWebSocketAdapter {
         sink: Arc<dyn AdapterEventSink>,
     ) -> Result<()> {
         let msg: Value = serde_json::from_str(text)?;
+        tracing::debug!("WS json frame parsed");
+
+        if msg.get("code").and_then(|v| v.as_i64()) == Some(200) {
+            self.conn.mark_server_response().await;
+        }
 
         // Send ACK (200) back with headers
         if let Some(headers) = msg.get("headers") {
@@ -173,6 +242,13 @@ impl FishWebSocketAdapter {
 
         // Only process syncPushPackage messages
         if !text.contains("syncPushPackage") {
+            tracing::info!(
+                "WS non-sync frame ignored: {}",
+                msg.get("lwp")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| msg.get("code").and_then(|v| v.as_i64().map(|_| "code")))
+                    .unwrap_or("unknown")
+            );
             return Ok(());
         }
 
@@ -190,43 +266,40 @@ impl FishWebSocketAdapter {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        let item = match data_list.first() {
+            Some(item) => item,
+            None => return Ok(()),
+        };
+        let raw_data = match item.get("data").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
-        for item in &data_list {
-            let raw_data = match item.get("data").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Reference implementation ignores plain JSON sync payloads and only
-            // processes MessagePack business events here.
-            let decrypted = match decode_sync_payload(raw_data) {
-                Some(value) => value,
-                None => continue,
-            };
-
-            // Parse decrypted message into MessageEvent
-            match self.parse_event(&decrypted).await {
-                Some(event) => {
-                    tracing::info!(
-                        "[接收] <- {}({}): {}",
-                        event.sender_name,
-                        event.sender_id,
-                        event.summary()
-                    );
-                    sink.handle_message(event).await?;
-                }
-                None => {
-                    // Skip typing status and system messages
-                    if is_typing_status(&decrypted) || is_system_message(&decrypted) {
-                        continue;
-                    }
-
-                    // Not a chat message — classify and emit as SystemEvent
-                    let event_type = classify_event_type(&decrypted);
-                    sink.handle_system(SystemEvent::new(event_type, decrypted))
-                        .await?;
-                }
+        let decrypted = match decode_sync_payload(raw_data) {
+            DecodedSyncPayload::Message(value) => value,
+            DecodedSyncPayload::PlainJson(value) => {
+                tracing::info!(
+                    "sync payload skipped: plain JSON {}",
+                    summarize_json_shape(&value)
+                );
+                return Ok(());
             }
+            DecodedSyncPayload::Unsupported(reason) => {
+                tracing::info!("sync payload skipped: unsupported payload ({reason})");
+                return Ok(());
+            }
+        };
+
+        if let Some(event) = self.parse_event(&decrypted).await {
+            tracing::info!(
+                "[接收] <- {}({}): {}",
+                event.sender_name,
+                event.sender_id,
+                event.summary()
+            );
+            sink.handle_message(event).await?;
+        } else if is_typing_status(&decrypted) || is_system_message(&decrypted) {
+            return Ok(());
         }
 
         Ok(())
@@ -277,40 +350,15 @@ impl FishWebSocketAdapter {
             .unwrap_or("")
             .to_string();
 
-        // Extract message content from field 6, fallback to reminderContent
-        let content = body.get("6").or_else(|| body.get("content")).or_else(|| {
-            body.get("3")
-                .and_then(|v3| v3.get("5"))
-                .or_else(|| payload.get("messages"))
-        });
-
         let reminder_content = sender_field
             .and_then(|s| s.get("reminderContent"))
             .and_then(|v| v.as_str());
 
-        let segments = match content {
-            Some(c) => {
-                let decoded = decode_content(c).unwrap_or_default();
-                if decoded.is_empty() || should_fallback_to_reminder_content(&decoded) {
-                    match reminder_content {
-                        Some(text) => vec![MessageSegment::Text {
-                            text: text.to_string(),
-                        }],
-                        None => decoded,
-                    }
-                } else {
-                    decoded
-                }
-            }
-            None => {
-                // Fallback: extract text from message["1"]["10"]["reminderContent"]
-                match reminder_content {
-                    Some(text) => vec![MessageSegment::Text {
-                        text: text.to_string(),
-                    }],
-                    None => Vec::new(),
-                }
-            }
+        let segments = match reminder_content {
+            Some(text) => vec![MessageSegment::Text {
+                text: text.to_string(),
+            }],
+            None => Vec::new(),
         };
 
         let messages = MessageChain::from(segments);
@@ -408,6 +456,7 @@ fn is_system_message(payload: &Value) -> bool {
 /// Try to extract a meaningful event type from a non-chat decrypted payload.
 /// Examines common field names that fish server uses for business events.
 /// Also checks nested fields like `["3"]["redReminder"]` for order events.
+#[cfg(test)]
 fn classify_event_type(payload: &Value) -> String {
     // Check order/transaction events via redReminder in field 3
     if let Some(field3) = payload.get("3").and_then(|v| v.as_object()) {
@@ -436,7 +485,35 @@ fn classify_event_type(payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use fish_core::event::SystemEvent;
     use fish_core::message::{MessageChain, MessageSegment};
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        messages: Mutex<Vec<MessageEvent>>,
+        systems: Mutex<Vec<SystemEvent>>,
+    }
+
+    #[async_trait]
+    impl AdapterEventSink for RecordingSink {
+        async fn handle_message(&self, event: MessageEvent) -> Result<()> {
+            self.messages.lock().await.push(event);
+            Ok(())
+        }
+
+        async fn handle_system(&self, event: SystemEvent) -> Result<()> {
+            self.systems.lock().await.push(event);
+            Ok(())
+        }
+    }
+
+    fn encode_sync_item(payload: &Value) -> anyhow::Result<Value> {
+        Ok(serde_json::json!({
+            "data": STANDARD.encode(rmp_serde::to_vec(payload)?)
+        }))
+    }
 
     #[test]
     fn t3_55_new_creates_adapter() -> anyhow::Result<()> {
@@ -522,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn t3_61c_build_send_message_matches_reference_multi_segment_shape() -> anyhow::Result<()> {
+    fn t3_61c_build_send_message_rejects_multi_segment_messages() {
         let chain = MessageChain::from(vec![
             MessageSegment::text("hello"),
             MessageSegment::Image {
@@ -531,49 +608,30 @@ mod tests {
                 height: 240,
             },
         ]);
-        let msg = build_send_message("buyer-2", &chain, None, "seller-2")?;
-
-        assert_eq!(msg["body"][0]["cid"], "buyer-2@goofish");
-        assert_eq!(msg["body"][0]["content"]["custom"]["type"], 2);
-
-        let decoded = STANDARD.decode(
-            msg["body"][0]["content"]["custom"]["data"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing custom data"))?,
-        )?;
-        let inner: Value = serde_json::from_slice(&decoded)?;
-        assert_eq!(inner["contentType"], 101);
-
-        let nested = STANDARD.decode(
-            inner["custom"]["data"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing nested custom data"))?,
-        )?;
-        let segments: Value = serde_json::from_slice(&nested)?;
-        assert_eq!(segments[0]["type"], "text");
-        assert_eq!(segments[1]["type"], "image");
-        assert_eq!(segments[1]["image_url"], "https://img.example/item.jpg");
-        Ok(())
+        let err = build_send_message("buyer-2", &chain, None, "seller-2").unwrap_err();
+        assert!(err.to_string().contains("plain text"));
     }
 
     #[tokio::test]
-    async fn t3_62_send_multi_segment() -> anyhow::Result<()> {
+    async fn t3_62_send_multi_segment_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(vec![
             MessageSegment::text("hello"),
             MessageSegment::text("world"),
         ]);
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "multi segment send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn t3_63_send_with_image() -> anyhow::Result<()> {
+    async fn t3_63_send_with_image_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(MessageSegment::image("https://example.com/pic.jpg"));
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "image send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
@@ -587,14 +645,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_65_send_with_audio() -> anyhow::Result<()> {
+    async fn t3_65_send_with_audio_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(MessageSegment::Audio {
             audio_url: "https://example.com/sound.mp3".into(),
             duration_ms: 3000,
         });
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "audio send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
@@ -614,19 +673,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_68_send_with_custom_node() -> anyhow::Result<()> {
+    async fn t3_68_send_with_custom_node_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(MessageSegment::CustomNode {
             desc: "test".into(),
             content: serde_json::json!({"type": "custom"}),
         });
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "custom node send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn t3_69_send_mixed_segments() -> anyhow::Result<()> {
+    async fn t3_69_send_mixed_segments_are_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(vec![
             MessageSegment::text("hello"),
@@ -637,12 +697,13 @@ mod tests {
             },
         ]);
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "mixed send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn t3_70_send_with_audio_segment() -> anyhow::Result<()> {
+    async fn t3_70_send_with_audio_segment_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(vec![
             MessageSegment::text("audio file:"),
@@ -652,12 +713,13 @@ mod tests {
             },
         ]);
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "text+audio send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn t3_71_send_with_custom_node_multi() -> anyhow::Result<()> {
+    async fn t3_71_send_with_custom_node_multi_is_rejected_before_websocket() -> anyhow::Result<()> {
         let adapter = FishWebSocketAdapter::new();
         let chain = MessageChain::from(vec![
             MessageSegment::text("custom:"),
@@ -667,7 +729,8 @@ mod tests {
             },
         ]);
         let result = adapter.send("target", &chain, None).await;
-        assert!(result.is_err(), "should fail without WebSocket");
+        assert!(result.is_err(), "text+custom send should fail");
+        assert!(result.unwrap_err().to_string().contains("plain text"));
         Ok(())
     }
 
@@ -775,10 +838,14 @@ mod tests {
 
     #[test]
     fn t3_80b_decode_sync_payload_skips_plain_json() -> anyhow::Result<()> {
-        let raw = STANDARD.encode(serde_json::to_string(&serde_json::json!({
+        let original = serde_json::json!({
             "message": "plain sync payload"
-        }))?);
-        assert!(decode_sync_payload(&raw).is_none());
+        });
+        let raw = STANDARD.encode(serde_json::to_string(&original)?);
+        assert_eq!(
+            decode_sync_payload(&raw),
+            DecodedSyncPayload::PlainJson(original)
+        );
         Ok(())
     }
 
@@ -789,7 +856,26 @@ mod tests {
             "3": {"redReminder": "等待买家付款"}
         });
         let raw = STANDARD.encode(rmp_serde::to_vec(&original)?);
-        assert_eq!(decode_sync_payload(&raw), Some(original));
+        assert_eq!(
+            decode_sync_payload(&raw),
+            DecodedSyncPayload::Message(original)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80ca_decode_sync_payload_cleans_non_base64_chars() -> anyhow::Result<()> {
+        let original = serde_json::json!({
+            "message": "plain sync payload"
+        });
+        let raw = format!(
+            "\n{}\n###",
+            STANDARD.encode(serde_json::to_string(&original)?)
+        );
+        assert_eq!(
+            decode_sync_payload(&raw),
+            DecodedSyncPayload::PlainJson(original)
+        );
         Ok(())
     }
 
@@ -821,6 +907,15 @@ mod tests {
         assert!(is_bracket_system_message(" [已下单] "));
         assert!(!is_bracket_system_message("你好[系统消息]"));
         assert!(!is_bracket_system_message(""));
+        Ok(())
+    }
+
+    #[test]
+    fn t3_80f_summarize_ws_payload_truncates_multiline_text() -> anyhow::Result<()> {
+        let text = "line1\nline2".repeat(40);
+        let summary = summarize_ws_payload(&text);
+        assert!(!summary.contains('\n'));
+        assert!(summary.len() <= 240);
         Ok(())
     }
 
@@ -949,7 +1044,7 @@ mod tests {
             .await
             .ok_or_else(|| anyhow::anyhow!("expected message event"))?;
 
-        assert_eq!(event.messages.summary(), "来自 custom 的文本");
+        assert_eq!(event.messages.summary(), "来自 reminder 的文本");
         Ok(())
     }
 
@@ -1000,6 +1095,90 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("expected message event"))?;
 
         assert_eq!(event.messages.summary(), "参考实现会取这段文本");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_90_handle_raw_message_only_processes_first_sync_item() -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let sink = Arc::new(RecordingSink::default());
+        let first = serde_json::json!({
+            "1": {
+                "2": "cid-1@goofish",
+                "10": {
+                    "senderUserId": "buyer-1",
+                    "reminderTitle": "买家1",
+                    "reminderContent": "first message"
+                }
+            }
+        });
+        let second = serde_json::json!({
+            "1": {
+                "2": "cid-2@goofish",
+                "10": {
+                    "senderUserId": "buyer-2",
+                    "reminderTitle": "买家2",
+                    "reminderContent": "second message"
+                }
+            }
+        });
+        let frame = serde_json::json!({
+            "headers": {
+                "mid": "123 0",
+                "sid": "sid-1"
+            },
+            "body": {
+                "syncPushPackage": {
+                    "data": [
+                        encode_sync_item(&first)?,
+                        encode_sync_item(&second)?
+                    ]
+                }
+            }
+        });
+
+        adapter
+            .handle_raw_message(&serde_json::to_string(&frame)?, sink.clone())
+            .await?;
+
+        let messages = sink.messages.lock().await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].plain_text(), "first message");
+        drop(messages);
+        assert!(sink.systems.lock().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_91_handle_raw_message_drops_non_chat_sync_payload() -> anyhow::Result<()> {
+        let adapter = Arc::new(FishWebSocketAdapter::new());
+        let sink = Arc::new(RecordingSink::default());
+        let non_chat = serde_json::json!({
+            "action": "trade_notice",
+            "3": {
+                "redReminder": "等待买家付款"
+            }
+        });
+        let frame = serde_json::json!({
+            "headers": {
+                "mid": "123 0",
+                "sid": "sid-1"
+            },
+            "body": {
+                "syncPushPackage": {
+                    "data": [
+                        encode_sync_item(&non_chat)?
+                    ]
+                }
+            }
+        });
+
+        adapter
+            .handle_raw_message(&serde_json::to_string(&frame)?, sink.clone())
+            .await?;
+
+        assert!(sink.messages.lock().await.is_empty());
+        assert!(sink.systems.lock().await.is_empty());
         Ok(())
     }
 }
