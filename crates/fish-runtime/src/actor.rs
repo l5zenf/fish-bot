@@ -7,7 +7,7 @@ use kameo::prelude::*;
 use crate::handlers::{
     EventHandlerContext, EventHandlerFunc, HandlerContext, MessageHandler, RouteHint,
 };
-use crate::runtime::{QueueStrategy, RuntimeConfig};
+use crate::runtime::RuntimeConfig;
 use crate::{BaseAdapter, Plugin};
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
@@ -34,14 +34,6 @@ impl PluginActor {
     /// Create a new PluginActor, reading `RuntimeConfig` from the plugin itself.
     pub(crate) fn new(plugin: Arc<dyn Plugin>) -> Self {
         let config = plugin.runtime_config();
-        Self::with_runtime(plugin, config)
-    }
-
-    /// Create a PluginActor with an explicit queue strategy (other config from plugin default).
-    #[allow(dead_code)]
-    pub(crate) fn with_strategy(plugin: Arc<dyn Plugin>, strategy: QueueStrategy) -> Self {
-        let mut config = plugin.runtime_config();
-        config.queue_strategy = strategy;
         Self::with_runtime(plugin, config)
     }
 
@@ -320,13 +312,6 @@ pub(crate) mod tests {
         let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
         let actor = PluginActor::new(plugin);
         let _ref = PluginActor::spawn(actor);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn t2_5b_with_strategy_overrides_runtime_config() {
-        let plugin: Arc<dyn Plugin> = Arc::new(make_test_plugin());
-        let actor = PluginActor::with_strategy(plugin, QueueStrategy::DropOldest(8));
-        assert_eq!(actor.plugin().metadata().id, "test");
     }
 
     #[tokio::test(flavor = "multi_thread")]

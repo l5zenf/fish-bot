@@ -21,7 +21,6 @@ pub(crate) struct FishAPI {
     poll_params: Mutex<Option<HashMap<String, String>>>,
 }
 
-#[allow(dead_code)]
 impl FishAPI {
     pub(crate) fn new(auth: AuthManager) -> Self {
         let device_id = generate_device_id("");
@@ -68,16 +67,8 @@ impl FishAPI {
         self.device_id.clone()
     }
 
-    pub(crate) async fn cookies_str(&self) -> String {
-        self.auth.cookie_header().await
-    }
-
     pub(crate) async fn my_id(&self) -> String {
         self.auth.my_id().await
-    }
-
-    pub(crate) fn auth(&self) -> &AuthManager {
-        &self.auth
     }
 
     // ---- Core MTOP call ----
@@ -503,53 +494,6 @@ impl FishAPI {
         Ok(result)
     }
 
-    // ---- User APIs ----
-
-    pub async fn get_user_info(&self, user_id: &str) -> Result<Value> {
-        let data = serde_json::json!({
-            "self": user_id.is_empty(),
-            "userId": user_id,
-        });
-        let mut extra = HashMap::new();
-        extra.insert(
-            "spm_pre".to_string(),
-            "a21ybx.home.nav.1.62953da6OYFsax".to_string(),
-        );
-        extra.insert("log_id".to_string(), "62953da6OYFsax".to_string());
-        self.call_mtop("mtop.idle.web.user.page.head", "1.0", &data, Some(&extra))
-            .await
-    }
-
-    // ---- Item APIs ----
-
-    pub async fn get_item_list(&self, user_id: &str, page: u64, page_size: u64) -> Result<Value> {
-        let data = serde_json::json!({
-            "userId": user_id,
-            "pageNumber": page,
-            "pageSize": page_size,
-        });
-        let mut extra = HashMap::new();
-        extra.insert(
-            "spm_pre".to_string(),
-            "a21ybx.home.nav.1.62953da6OYFsax".to_string(),
-        );
-        extra.insert("log_id".to_string(), "62953da6OYFsax".to_string());
-        self.call_mtop("mtop.idle.web.xyh.item.list", "1.0", &data, Some(&extra))
-            .await
-    }
-
-    pub async fn get_item_info(&self, item_id: &str) -> Result<Value> {
-        let data = serde_json::json!({ "itemId": item_id });
-        let mut extra = HashMap::new();
-        extra.insert(
-            "spm_pre".to_string(),
-            "a21ybx.item.want.1.12523da6waCtUp".to_string(),
-        );
-        extra.insert("log_id".to_string(), "12523da6waCtUp".to_string());
-        self.call_mtop("mtop.taobao.idle.pc.detail", "1.0", &data, Some(&extra))
-            .await
-    }
-
     // ---- Auth orchestration ----
 
     /// Ensure we have valid authentication before connecting.
@@ -814,14 +758,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_60_api_cookies_str_does_not_panic() -> anyhow::Result<()> {
-        let api = FishAPI::new(test_auth());
-        let _cookies = api.cookies_str().await;
-        // cookies may or may not be present depending on environment
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn t3_61_api_my_id_does_not_panic() -> anyhow::Result<()> {
         let api = FishAPI::new(test_auth());
         let _id = api.my_id().await;
@@ -851,13 +787,6 @@ mod tests {
             cloned_pp.is_none(),
             "cloned api should have independent None poll_params"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn t3_64_api_auth_returns_ref() -> anyhow::Result<()> {
-        let api = FishAPI::new(test_auth());
-        let _auth: &AuthManager = api.auth();
         Ok(())
     }
 

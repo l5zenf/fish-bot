@@ -1,4 +1,3 @@
-use fish_core::error::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +7,6 @@ use tokio::sync::Mutex;
 pub(crate) struct AuthManager {
     client: reqwest::Client,
     pub(crate) cookies: Arc<Mutex<HashMap<String, String>>>,
-    device_id: String,
     data_dir: PathBuf,
 }
 
@@ -18,11 +16,8 @@ impl Default for AuthManager {
     }
 }
 
-#[allow(dead_code)]
 impl AuthManager {
     pub(crate) fn new() -> Self {
-        let device_id = crate::sign::generate_device_id("");
-
         // Try loading from file first, then env var
         let data_dir = Self::resolve_data_dir();
         let cookies = Self::load_cookies_from_file(&data_dir)
@@ -32,7 +27,6 @@ impl AuthManager {
         Self {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new(cookies)),
-            device_id,
             data_dir,
         }
     }
@@ -126,10 +120,6 @@ impl AuthManager {
         }
     }
 
-    pub(crate) fn device_id(&self) -> String {
-        self.device_id.clone()
-    }
-
     pub(crate) async fn get_cookies(&self) -> HashMap<String, String> {
         self.cookies.lock().await.clone()
     }
@@ -150,42 +140,14 @@ impl AuthManager {
         cookies.get("unb").cloned().unwrap_or_default()
     }
 
-    /// Perform QR code login — returns the cookies dict.
-    /// Delegates to FishAPI which handles the full QR flow (generate, display, poll).
-    pub(crate) async fn qrcode_login(&mut self) -> Result<HashMap<String, String>> {
-        let api = super::api::FishAPI::new(self.clone());
-        api.ensure_auth().await?;
-        Ok(self.get_cookies().await)
-    }
-
     #[cfg(test)]
     pub(crate) fn test_new(data_dir: PathBuf) -> Self {
-        let device_id = crate::sign::generate_device_id("");
         let cookies = Self::load_cookies_from_file(&data_dir).unwrap_or_default();
         Self {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new(cookies)),
-            device_id,
             data_dir,
         }
-    }
-
-    /// Create AuthManager from local cookies. If no cookies found,
-    /// call `qrcode_login()` to initiate QR login flow.
-    pub(crate) async fn from_local_or_qr_login() -> Result<Self> {
-        let mut auth = Self::new();
-        {
-            let cookies = auth.cookies.lock().await;
-            if cookies.is_empty() {
-                drop(cookies);
-                auth.qrcode_login().await?;
-            }
-        }
-        Ok(auth)
-    }
-
-    pub(crate) async fn refresh_if_needed(&mut self) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -194,7 +156,6 @@ impl Clone for AuthManager {
         Self {
             client: self.client.clone(),
             cookies: self.cookies.clone(),
-            device_id: self.device_id.clone(),
             data_dir: self.data_dir.clone(),
         }
     }
@@ -263,14 +224,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn t3_29_device_id_non_empty() -> anyhow::Result<()> {
-        let dir = temp_auth_dir()?;
-        let auth = AuthManager::test_new(dir);
-        assert!(!auth.device_id().is_empty());
-        Ok(())
-    }
-
     #[tokio::test]
     async fn t3_30_empty_cookies_header() -> anyhow::Result<()> {
         let dir = temp_auth_dir()?;
@@ -287,7 +240,6 @@ mod tests {
             cookies: Arc::new(Mutex::new(
                 [("k1".into(), "v1".into()), ("k2".into(), "v2".into())].into(),
             )),
-            device_id: "dev".into(),
             data_dir: PathBuf::from("/tmp"),
         };
         let header = auth.cookie_header().await;
@@ -300,7 +252,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new([("unb".into(), "user999".into())].into())),
-            device_id: "dev".into(),
             data_dir: PathBuf::from("/tmp"),
         };
         assert_eq!(auth.my_id().await, "user999");
@@ -311,7 +262,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new(HashMap::new())),
-            device_id: "dev".into(),
             data_dir: PathBuf::from("/tmp"),
         };
         assert_eq!(auth.my_id().await, "");
@@ -323,7 +273,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new([("unb".into(), "save_test".into())].into())),
-            device_id: "dev".into(),
             data_dir: dir.clone(),
         };
 
@@ -347,7 +296,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new(HashMap::new())),
-            device_id: "dev".into(),
             data_dir: dir.clone(),
         };
         auth.rm_auth_file().await;
@@ -373,21 +321,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_37_from_local_or_qr_login() -> anyhow::Result<()> {
-        let test_cookies: HashMap<String, String> = [("unb".into(), "env_user".into())].into();
-        let json = serde_json::to_string(&test_cookies)?;
-        unsafe {
-            std::env::set_var("FISH_AUTH_JSON", &json);
-        }
-        let result = AuthManager::from_local_or_qr_login().await;
-        unsafe {
-            std::env::remove_var("FISH_AUTH_JSON");
-        }
-        assert!(result.is_ok());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn t3_38_save_cookies_creates_dir() -> anyhow::Result<()> {
         use tempfile::tempdir;
         let dir = tempdir()?;
@@ -396,7 +329,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new([("unb".into(), "test".into())].into())),
-            device_id: "dev".into(),
             data_dir: nested.clone(),
         };
 
@@ -423,28 +355,14 @@ mod tests {
         Ok(())
     }
 
-    // t3_48 removed: qrcode_login now delegates to FishAPI which makes HTTP calls.
-    // QR login tests are integration-level and require network access.
-
-    #[tokio::test]
-    async fn t3_49_refresh_if_needed_returns_ok() -> anyhow::Result<()> {
-        let dir = temp_auth_dir()?;
-        let mut auth = AuthManager::test_new(dir);
-        let result = auth.refresh_if_needed().await;
-        assert!(result.is_ok(), "refresh_if_needed should return Ok(())");
-        Ok(())
-    }
-
     #[tokio::test]
     async fn t3_50_clone_preserves_cookies() -> anyhow::Result<()> {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new([("unb".into(), "clone_test".into())].into())),
-            device_id: "dev123".into(),
             data_dir: PathBuf::from("/tmp"),
         };
         let cloned = auth.clone();
-        assert_eq!(cloned.device_id(), "dev123");
         let cookies = cloned.get_cookies().await;
         assert_eq!(cookies.get("unb"), Some(&"clone_test".to_string()));
         Ok(())
@@ -489,35 +407,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t3_54_auth_manager_clone_device_id_same() -> anyhow::Result<()> {
-        let dir = temp_auth_dir()?;
-        let auth = AuthManager::test_new(dir);
-        let device_id = auth.device_id();
-        let cloned = auth.clone();
-        assert_eq!(cloned.device_id(), device_id);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn t3_55_from_local_or_qr_login_returns_ok() -> anyhow::Result<()> {
-        let test_cookies: HashMap<String, String> = [("unb".into(), "env_user".into())].into();
-        let json = serde_json::to_string(&test_cookies)?;
-        unsafe {
-            std::env::set_var("FISH_AUTH_JSON", &json);
-        }
-        let result = AuthManager::from_local_or_qr_login().await;
-        unsafe {
-            std::env::remove_var("FISH_AUTH_JSON");
-        }
-        assert!(result.is_ok(), "from_local_or_qr_login should return Ok");
-        let auth = result?;
-        let cookies = auth.get_cookies().await;
-        // Should have loaded from env or file, or be empty
-        let _ = cookies.len(); // just verify it doesn't crash
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn t3_56_load_cookies_from_file_empty_json() -> anyhow::Result<()> {
         let dir = temp_auth_dir()?;
         let auth_path = dir.join("fish_auth.json");
@@ -526,24 +415,6 @@ mod tests {
         if let Some(cookies) = result {
             assert!(cookies.is_empty(), "empty JSON should yield empty cookies");
         }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn t3_57_default_auth_manager() -> anyhow::Result<()> {
-        let auth = AuthManager::default();
-        assert!(!auth.device_id().is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn t3_58_new_auth_loads_from_default() -> anyhow::Result<()> {
-        // AuthManager::new() should not panic in any environment
-        let auth = AuthManager::new();
-        let device_id = auth.device_id();
-        assert!(!device_id.is_empty());
-        let cookies = auth.get_cookies().await;
-        let _ = cookies.len();
         Ok(())
     }
 
@@ -576,7 +447,6 @@ mod tests {
         let auth = AuthManager {
             client: reqwest::Client::new(),
             cookies: Arc::new(Mutex::new(HashMap::new())),
-            device_id: "dev".into(),
             data_dir: file_path.clone(), // data_dir is a file, not a dir
         };
         // This should handle the error gracefully (parent of fish_auth.json is a file)
