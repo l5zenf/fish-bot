@@ -2,23 +2,41 @@
 
 ![](./assets/bkg.png)
 
-`fish-bot` 是一个围绕 fish 消息场景构建的 Rust 插件运行时。
+`fish-bot` 是一个面向 fish 消息场景的 Rust 插件运行时。
 
-仓库拆成四层：
+它解决的是同一类问题：把“平台接入”和“业务插件”拆开。你可以直接用仓库自带的 `FishWebSocketAdapter` 跑起来，也可以保留 runtime，只换掉 adapter，接到你自己的消息来源上。
+
+## 这是什么
+
+这个仓库不是单个可执行程序，而是一个 workspace：
 
 - `fish-core`
-  定义稳定抽象：`BaseAdapter`、`AdapterEventSink`、消息模型、事件模型、规则、共享上下文。
+  定义稳定边界：`BaseAdapter`、`AdapterEventSink`、消息模型、事件模型、规则、共享上下文。
 - `fish-runtime`
-  负责运行时编排：加载插件、分发消息、管理上下文和 telemetry。
+  提供运行时编排：加载插件、分发消息、挂载上下文和 telemetry。
 - `fish-rt-adapter`
-  提供默认的 fish 适配器 `FishWebSocketAdapter`，包含 Cookie 导入、MTOP token 获取、WebSocket 建连和协议处理。
+  提供默认的 `FishWebSocketAdapter`，并统一对外 re-export 常用运行时 API。
 - `fish-plugin-macros`
-  提供 `#[plugin]`、`#[message]`、`#[event]` 这套插件声明宏。
+  提供 `#[plugin]`、`#[message]`、`#[event]` 等插件声明宏。
 
-如果你只想用现成的 fish 运行时，直接用 `fish-rt-adapter`。
-如果你想把运行时接到别的平台，实现 `BaseAdapter` 就够了。
+仓库里还带了两个可以直接运行的示例：
 
-## 现在仓库里有什么
+- `examples/quickstart-simple`
+  演示宏插件写法。
+- `examples/quickstart-custom`
+  演示 actor-first 插件写法。
+
+## 适合什么场景
+
+这个项目适合下面两类需求：
+
+- 你想快速做一个 fish 消息机器人，但不想把接入层、调度层、业务层全写在一起。
+- 你想复用一套消息运行时，只把 fish adapter 当成默认实现。
+
+如果你要的是“一个已经做完全部业务流程的成品系统”，这里不是那个方向。
+如果你要的是“一个边界清晰、可以继续扩展的底座”，这个仓库就是干这个的。
+
+## 仓库结构
 
 ```text
 crates/
@@ -28,8 +46,8 @@ crates/
   fish-plugin-macros
 
 examples/
-  quickstart-simple   宏插件示例
-  quickstart-custom   actor-first 插件示例
+  quickstart-simple
+  quickstart-custom
 
 tests/
   adapter_test.rs
@@ -46,9 +64,9 @@ fish-rt-adapter -> fish-core + fish-runtime
 fish-plugin-macros -> fish-runtime
 ```
 
-## 核心模型
+## 核心心智模型
 
-运行时的职责很简单：把外部平台消息交给插件。
+运行时只做一件事：把外部消息交给插件。
 
 ```text
 BaseAdapter
@@ -57,7 +75,7 @@ BaseAdapter
         -> handler
 ```
 
-边界也很明确：
+职责拆分如下：
 
 - `BaseAdapter`
   负责接入外部平台，以及发送消息。
@@ -66,7 +84,11 @@ BaseAdapter
 - `Plugin`
   负责业务处理。
 
-这意味着宿主不需要知道 fish 协议细节，也不需要知道运行时内部的调度实现。
+你可以把它理解成一条非常简单的链路：
+
+1. adapter 收到平台消息
+2. runtime 把消息路由到插件
+3. 插件决定是否回复、记录状态或触发别的逻辑
 
 ## 快速开始
 
@@ -76,21 +98,21 @@ BaseAdapter
 cargo --version
 ```
 
-然后直接跑 example。
+然后直接运行示例。
 
-宏插件版本：
+宏插件示例：
 
 ```bash
 cargo run -p fish-example-quickstart-simple
 ```
 
-actor-first 版本：
+actor-first 示例：
 
 ```bash
 cargo run -p fish-example-quickstart-custom
 ```
 
-如果你已经从浏览器拿到了完整 Cookie 请求头，可以在启动前导入：
+如果你已经拿到了浏览器里的原始 Cookie header，也可以在启动前导入：
 
 ```bash
 cargo run -p fish-example-quickstart-simple -- --cookies "cookie2=...; unb=...; _m_h5_tk=..."
@@ -102,11 +124,11 @@ cargo run -p fish-example-quickstart-simple -- --cookies "cookie2=...; unb=...; 
 cargo run -p fish-example-quickstart-custom -- --cookies "cookie2=...; unb=...; _m_h5_tk=..."
 ```
 
-导入后会把可用 Cookie 持久化到 `data/fish_auth.json`。
+导入后，认证信息会持久化到 `data/fish_auth.json`。
 
 ## Cookie 和认证文件
 
-仓库支持直接导入浏览器抓到的原始 `Cookie` header：
+仓库支持把浏览器抓到的原始 Cookie header 直接导入：
 
 ```rust
 use fish_rt_adapter::import_browser_cookies;
@@ -115,7 +137,7 @@ let report = import_browser_cookies(raw_cookie_header).await?;
 println!("imported {} cookies into {}", report.imported, report.path.display());
 ```
 
-解析时会自动忽略浏览器附带的 Cookie 属性，例如：
+解析时会自动过滤浏览器附带的 Cookie 属性，例如：
 
 - `Max-Age`
 - `Expires`
@@ -125,11 +147,11 @@ println!("imported {} cookies into {}", report.imported, report.path.display());
 - `Secure`
 - `HttpOnly`
 
-默认的认证文件路径是 `data/fish_auth.json`。这个文件已经在 `.gitignore` 中忽略，不应该提交。
+默认认证文件路径是 `data/fish_auth.json`。这个文件已经在 `.gitignore` 中忽略，不应该提交。
 
 ## 最小宿主示例
 
-标准启动方式就是把 adapter 和 plugins 交给 `RuntimeHost`：
+最常见的启动方式就是把 adapter 和 plugins 交给 `RuntimeHost`：
 
 ```rust
 use std::sync::Arc;
@@ -167,9 +189,11 @@ async fn main() -> Result<()> {
 
 ## 写插件
 
-### 1. 宏插件
+这个仓库有两条主要插件开发路径。
 
-这是最直接的写法，也是 `examples/quickstart-simple` 使用的方式：
+### 宏插件
+
+这是最直接的写法，也是 `examples/quickstart-simple` 用的方式：
 
 ```rust
 use fish_rt_adapter::plugin;
@@ -193,9 +217,15 @@ impl EchoPlugin {
 }
 ```
 
-### 2. Actor-first 插件
+适合场景：
 
-如果你希望手工控制 actor 状态和邮箱，可以使用 `ActorPluginBuilder`。这是 `examples/quickstart-custom` 的方式：
+- 插件逻辑比较直白
+- 你更关心“处理消息”而不是“控制 actor 细节”
+- 你想用声明式方式快速起一个插件
+
+### Actor-first 插件
+
+如果你希望显式控制 actor 状态和邮箱，可以使用 `ActorPluginBuilder`。这是 `examples/quickstart-custom` 的方式：
 
 ```rust
 use fish_rt_adapter::ActorPluginBuilder;
@@ -230,9 +260,15 @@ impl Message<Ping> for CounterActor {
 }
 ```
 
+适合场景：
+
+- 你需要更明确的 actor 状态模型
+- 你想自己控制邮箱大小、消息类型和 actor 生命周期
+- 插件内部逻辑比简单 handler 更复杂
+
 ## 自定义 adapter
 
-如果你不想用 fish adapter，只要实现 `BaseAdapter`：
+如果你不想使用默认的 fish adapter，只要实现 `BaseAdapter`：
 
 ```rust
 use async_trait::async_trait;
@@ -267,9 +303,11 @@ impl BaseAdapter for MyAdapter {
 }
 ```
 
-## 对外 API
+只要 trait 边界一致，runtime 不关心你背后接的是哪个平台。
 
-`fish-rt-adapter` 当前对外导出的主要入口有：
+## 常用导出
+
+`fish-rt-adapter` 当前对外导出的常用入口有：
 
 - `FishWebSocketAdapter`
 - `import_browser_cookies`
@@ -278,7 +316,7 @@ impl BaseAdapter for MyAdapter {
 - `plugin`
 - `prelude::*`
 
-常见用法：
+常见导入方式：
 
 ```rust
 use fish_rt_adapter::prelude::*;
@@ -293,24 +331,26 @@ use fish_rt_adapter::{FishWebSocketAdapter, RuntimeHost, Telemetry, plugin};
 cargo test
 ```
 
-只跑 fish adapter：
+只跑 adapter：
 
 ```bash
 cargo test -p fish-rt-adapter -- --nocapture
 ```
 
-只跑 adapter facade 集成测试：
+只跑 facade 集成测试：
 
 ```bash
 cargo test --test fish_rt_adapter_api_test -- --nocapture
 ```
 
-## 适合谁
+## 从哪里看代码
 
-这个仓库适合两类人：
+如果你想快速建立上下文，优先看这些文件：
 
-- 想快速做一个 fish 消息机器人，但不想把协议、调度和业务逻辑揉在一起的人
-- 想复用消息运行时，只把 fish adapter 当成默认实现的人
+- [examples/quickstart-simple/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/bootstrap.rs)
+- [examples/quickstart-simple/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-simple/src/app/plugin.rs)
+- [examples/quickstart-custom/src/app/bootstrap.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/bootstrap.rs)
+- [examples/quickstart-custom/src/app/plugin.rs](/Users/xlh/Downloads/fish-bot/examples/quickstart-custom/src/app/plugin.rs)
+- [crates/fish-rt-adapter/src/lib.rs](/Users/xlh/Downloads/fish-bot/crates/fish-rt-adapter/src/lib.rs)
 
-如果你要的是“一个完整的 fish 自动交易系统”，这里还不是成品。
-如果你要的是“一个边界清晰、能继续扩展的运行时底座”，这个仓库就是干这个的。
+先看 examples，再回头看 crate，会更容易理解这个仓库的边界。
