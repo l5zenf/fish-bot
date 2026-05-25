@@ -2,9 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use syn::{
-    FnArg, Ident, ImplItem, ItemImpl, LitStr, Token, Type,
-    parse::ParseStream,
-    parse_macro_input,
+    FnArg, Ident, ImplItem, ItemImpl, LitStr, Token, Type, parse::ParseStream, parse_macro_input,
     spanned::Spanned,
 };
 
@@ -23,7 +21,11 @@ fn runtime_path() -> proc_macro2::TokenStream {
 
 fn extract_type_ident(ty: &Type) -> Option<Ident> {
     match ty {
-        Type::Path(type_path) => type_path.path.segments.last().map(|segment| segment.ident.clone()),
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.clone()),
         _ => None,
     }
 }
@@ -155,9 +157,9 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
             use super::*;
 
             pub(super) static METADATA: std::sync::LazyLock<
-                #runtime::PluginMetadata
+                #runtime::plugin::PluginMetadata
             > = std::sync::LazyLock::new(|| {
-                #runtime::PluginMetadata {
+                #runtime::plugin::PluginMetadata {
                     id: String::from(#id),
                     name: String::from(#name),
                     description: String::from(#description),
@@ -168,18 +170,18 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #runtime::Plugin for #struct_name {
-            fn metadata(&self) -> &#runtime::PluginMetadata {
+            fn metadata(&self) -> &#runtime::plugin::PluginMetadata {
                 &__fish_plugin_meta::METADATA
             }
 
-            fn initial_state(&self) -> Option<#runtime::PluginState> {
+            fn initial_state(&self) -> Option<#runtime::plugin::PluginState> {
                 Some(std::sync::Arc::new(tokio::sync::RwLock::new(
                     #struct_name::__fish_plugin_create_initial_state(),
                 )))
             }
 
-            fn message_handlers(&self) -> &[#runtime::MessageHandler] {
-                static HANDLERS: std::sync::LazyLock<Vec<#runtime::MessageHandler>> =
+            fn message_handlers(&self) -> &[#runtime::handlers::MessageHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<#runtime::handlers::MessageHandler>> =
                     std::sync::LazyLock::new(|| {
                         vec![
                             #(#msg_exprs),*
@@ -188,8 +190,8 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
                 &HANDLERS
             }
 
-            fn event_handlers(&self) -> &[#runtime::EventHandler] {
-                static HANDLERS: std::sync::LazyLock<Vec<#runtime::EventHandler>> =
+            fn event_handlers(&self) -> &[#runtime::handlers::EventHandler] {
+                static HANDLERS: std::sync::LazyLock<Vec<#runtime::handlers::EventHandler>> =
                     std::sync::LazyLock::new(|| {
                         vec![
                             #(#event_exprs),*
@@ -222,7 +224,7 @@ fn gen_message_handler(
     let closure_body = match receiver {
         ReceiverKind::MutRef => {
             quote! {
-                std::sync::Arc::new(move |cx: #runtime::HandlerContext| {
+                std::sync::Arc::new(move |cx: #runtime::handlers::HandlerContext| {
                     Box::pin(async move {
                         let mut plugin = cx.state_write::<#struct_name>().await?;
                         let event = cx.event;
@@ -237,7 +239,7 @@ fn gen_message_handler(
         }
         ReceiverKind::Ref => {
             quote! {
-                std::sync::Arc::new(move |cx: #runtime::HandlerContext| {
+                std::sync::Arc::new(move |cx: #runtime::handlers::HandlerContext| {
                     Box::pin(async move {
                         let plugin = cx.state_read::<#struct_name>().await?;
                         let event = cx.event;
@@ -256,19 +258,19 @@ fn gen_message_handler(
     let kind = route.kind.as_deref().unwrap_or("exact");
     match kind {
         "prefix" => {
-            quote! { #runtime::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::handlers::MessageHandler::prefix(#hid, vec![#pattern], #closure_body) }
         }
         "regex" => {
-            quote! { #runtime::MessageHandler::regex(#hid, #pattern, #closure_body) }
+            quote! { #runtime::handlers::MessageHandler::regex(#hid, #pattern, #closure_body) }
         }
         "fallback" => {
-            quote! { #runtime::MessageHandler::fallback(#hid, #closure_body) }
+            quote! { #runtime::handlers::MessageHandler::fallback(#hid, #closure_body) }
         }
         "keyword" => {
-            quote! { #runtime::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::handlers::MessageHandler::keyword(#hid, vec![#pattern], #closure_body) }
         }
         "exact" => {
-            quote! { #runtime::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
+            quote! { #runtime::handlers::MessageHandler::exact(#hid, vec![#pattern], #closure_body) }
         }
         other => panic!("unsupported message kind: {other}"),
     }
@@ -320,10 +322,10 @@ fn gen_event_handler(
     };
 
     quote! {
-        #runtime::EventHandler::new(
+        #runtime::handlers::EventHandler::new(
             #event_type,
             #hid,
-            std::sync::Arc::new(move |cx: #runtime::EventHandlerContext| { #closure_body }),
+            std::sync::Arc::new(move |cx: #runtime::handlers::EventHandlerContext| { #closure_body }),
         )
     }
 }
@@ -484,10 +486,8 @@ fn to_snake_case(input: &str) -> String {
     for (index, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() {
             let has_prev = index > 0;
-            let prev_is_lower_or_digit = has_prev
-                && chars[index - 1]
-                    .is_ascii_lowercase()
-                    || has_prev && chars[index - 1].is_ascii_digit();
+            let prev_is_lower_or_digit = has_prev && chars[index - 1].is_ascii_lowercase()
+                || has_prev && chars[index - 1].is_ascii_digit();
             let next_is_lower = chars
                 .get(index + 1)
                 .map(|next| next.is_ascii_lowercase())

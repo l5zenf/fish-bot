@@ -4,25 +4,22 @@ extern crate self as fish_runtime;
 pub mod actor;
 pub mod bot;
 pub mod builder;
+pub mod bus;
 pub mod context;
 pub mod fish;
+pub mod handlers;
 pub mod host;
 pub mod messages;
 pub mod plugin;
 pub mod prelude;
+pub mod runtime;
 
-pub use bot::{Bot, DispatchEvent, DispatchSystemEvent};
-pub use actor::PluginActor;
 pub use builder::{ActorMailbox, ActorPlugin, ActorPluginBuilder};
+pub use bus::{ActorBus, ActorBusHandle, RuntimeActorBus};
 pub use context::{EventContext, MessageContext};
 pub use fish::FishWebSocketAdapter;
 pub use host::RuntimeHost;
-pub use messages::{HandleEvent, HandleSystemEvent};
-pub use plugin::{
-    Capability, EventHandler, EventHandlerContext, EventHandlerFunc, EventHandlerFuture,
-    HandlerContext, HandlerFunc, HandlerFuture, MessageHandler, Plugin, PluginManifest,
-    PluginMetadata, PluginState, QueueStrategy, RouteHint, RuntimeConfig,
-};
+pub use plugin::Plugin;
 
 pub use fish_core::ctx::Ctx;
 pub use fish_core::error::{AppError, Result};
@@ -40,8 +37,8 @@ mod api_tests {
 
     #[test]
     fn runtime_exposes_plugin_author_api() {
-        use fish_runtime::prelude::*;
         use fish_runtime::plugin;
+        use fish_runtime::prelude::*;
 
         struct RuntimeApiPlugin;
 
@@ -61,8 +58,8 @@ mod api_tests {
 
     #[test]
     fn runtime_plugin_accepts_rust_init_expression() {
-        use fish_runtime::prelude::*;
         use fish_runtime::plugin;
+        use fish_runtime::prelude::*;
 
         struct CounterPlugin {
             value: u64,
@@ -83,7 +80,9 @@ mod api_tests {
         let state = state
             .downcast::<tokio::sync::RwLock<CounterPlugin>>()
             .expect("plugin state should downcast to typed lock");
-        let state = state.try_read().expect("initial state lock should be readable");
+        let state = state
+            .try_read()
+            .expect("initial state lock should be readable");
         assert_eq!(state.value, 7);
     }
 }

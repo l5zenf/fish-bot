@@ -6,7 +6,7 @@ use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::message::MessageChain;
 use fish_core::telemetry::Telemetry;
 
-use crate::BaseAdapter;
+use crate::{ActorBusHandle, AppError, BaseAdapter};
 
 /// Plugin-facing message context for `#[message]` handlers.
 pub struct MessageContext {
@@ -73,6 +73,13 @@ impl MessageContext {
     pub fn telemetry(&self) -> &Arc<Telemetry> {
         &self.telemetry
     }
+
+    pub fn bus(&self) -> Result<ActorBusHandle> {
+        self.app_ctx
+            .get::<ActorBusHandle>()
+            .map(|handle| (*handle).clone())
+            .ok_or_else(|| AppError::internal("actor bus is unavailable"))
+    }
 }
 
 /// Plugin-facing event context for `#[event]` handlers.
@@ -121,6 +128,13 @@ impl EventContext {
     pub fn telemetry(&self) -> &Arc<Telemetry> {
         &self.telemetry
     }
+
+    pub fn bus(&self) -> Result<ActorBusHandle> {
+        self.app_ctx
+            .get::<ActorBusHandle>()
+            .map(|handle| (*handle).clone())
+            .ok_or_else(|| AppError::internal("actor bus is unavailable"))
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +142,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::{ActorBusHandle, RuntimeActorBus};
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
 
@@ -137,7 +152,12 @@ mod tests {
 
     #[async_trait]
     impl BaseAdapter for RecordAdapter {
-        async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
+        async fn send(
+            &self,
+            target_id: &str,
+            message: &MessageChain,
+            cid: Option<&str>,
+        ) -> Result<()> {
             self.sent.lock().await.push((
                 target_id.to_string(),
                 cid.map(str::to_string),
@@ -177,6 +197,30 @@ mod tests {
         assert_eq!(guard[0].0, "demo-user");
         assert_eq!(guard[0].1.as_deref(), Some("demo-cid"));
         assert_eq!(guard[0].2, "pong");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn t3_2_message_context_exposes_runtime_bus() -> Result<()> {
+        let app_ctx = Arc::new(Ctx::new());
+        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+
+        let ctx = MessageContext::new(
+            MessageEvent::new(
+                "demo-cid".into(),
+                "demo-user".into(),
+                "Demo User".into(),
+                MessageChain::from("/ping"),
+                serde_json::json!({}),
+            ),
+            Arc::new(RecordAdapter {
+                sent: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            }),
+            app_ctx,
+            Arc::new(Telemetry::new()),
+        );
+
+        assert!(ctx.bus().is_ok());
         Ok(())
     }
 }

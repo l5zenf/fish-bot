@@ -4,10 +4,13 @@ use std::sync::Arc;
 use kameo::message::{Context, Message};
 use kameo::prelude::*;
 
+use crate::actor::PluginActor;
+use crate::handlers::RouteHint;
+use crate::messages::{HandleEvent, HandleSystemEvent};
+use crate::{BaseAdapter, Plugin};
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
-use crate::{BaseAdapter, HandleEvent, HandleSystemEvent, Plugin, PluginActor, RouteHint};
 
 /// A routing target resolved at startup — maps a route to a specific handler.
 #[derive(Clone)]
@@ -271,7 +274,9 @@ mod tests {
     use fish_core::rule::is_fullmatch;
     use fish_core::telemetry::Telemetry;
     use fish_runtime::BaseAdapter;
-    use fish_runtime::{HandlerContext, MessageHandler, Plugin, PluginMetadata};
+    use fish_runtime::Plugin;
+    use fish_runtime::handlers::{HandlerContext, MessageHandler, RouteHint};
+    use fish_runtime::plugin::PluginMetadata;
     use kameo::actor::Spawn;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

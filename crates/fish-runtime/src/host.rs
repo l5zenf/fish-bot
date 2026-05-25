@@ -7,10 +7,9 @@ use kameo::actor::Spawn;
 use fish_core::AdapterEventSink;
 use fish_core::event::{MessageEvent, SystemEvent};
 
-use crate::{
-    BaseAdapter, Bot, Ctx, DispatchEvent, DispatchSystemEvent, Plugin, PluginActor, Result,
-    Telemetry,
-};
+use crate::actor::PluginActor;
+use crate::bot::{Bot, DispatchEvent, DispatchSystemEvent};
+use crate::{ActorBusHandle, BaseAdapter, Ctx, Plugin, Result, RuntimeActorBus, Telemetry};
 
 pub struct RuntimeHost {
     adapter: Arc<dyn BaseAdapter>,
@@ -24,6 +23,10 @@ impl RuntimeHost {
         ctx: Arc<Ctx>,
         telemetry: Arc<Telemetry>,
     ) -> Self {
+        if ctx.get::<ActorBusHandle>().is_none() {
+            ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+        }
+
         let plugin_refs = plugins
             .into_iter()
             .map(|plugin| {
@@ -32,12 +35,7 @@ impl RuntimeHost {
             })
             .collect();
 
-        let bot_ref = Bot::spawn(Bot::new(
-            Arc::clone(&adapter),
-            plugin_refs,
-            ctx,
-            telemetry,
-        ));
+        let bot_ref = Bot::spawn(Bot::new(Arc::clone(&adapter), plugin_refs, ctx, telemetry));
 
         Self { adapter, bot_ref }
     }

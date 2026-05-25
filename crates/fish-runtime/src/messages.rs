@@ -1,12 +1,13 @@
-use std::sync::Arc;
 use kameo::message::{Context, Message};
+use std::sync::Arc;
 
 use fish_core::ctx::Ctx;
 use fish_core::event::{MessageEvent, SystemEvent};
 use fish_core::telemetry::Telemetry;
 
+use crate::BaseAdapter;
 use crate::actor::PluginActor;
-use crate::{BaseAdapter, EventHandlerContext, EventHandlerFunc, MessageHandler, RouteHint};
+use crate::handlers::{EventHandlerContext, EventHandlerFunc, MessageHandler, RouteHint};
 
 /// Handle a message event — fanned out by BotActor with shared deps.
 /// When `handler_id` is set, only that specific handler is executed
@@ -148,12 +149,12 @@ mod tests {
     use fish_core::message::MessageChain;
     use tokio::sync::Notify;
 
-    use crate::{
-        BaseAdapter, EventContext, EventHandler, EventHandlerContext, Plugin, PluginMetadata,
-        QueueStrategy, Result, RuntimeConfig,
-    };
-    use kameo::actor::Spawn;
+    use crate::handlers::{EventHandler, EventHandlerContext};
     use crate::plugin;
+    use crate::plugin::PluginMetadata;
+    use crate::runtime::{QueueStrategy, RuntimeConfig};
+    use crate::{BaseAdapter, EventContext, Plugin, Result};
+    use kameo::actor::Spawn;
 
     struct MockAdapter;
 
@@ -328,7 +329,10 @@ mod tests {
 
         let _ = actor_ref
             .tell(HandleSystemEvent {
-                event: Arc::new(SystemEvent::new("order_create", serde_json::json!({"n": 1}))),
+                event: Arc::new(SystemEvent::new(
+                    "order_create",
+                    serde_json::json!({"n": 1}),
+                )),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: Some("busy_event".into()),
@@ -340,7 +344,10 @@ mod tests {
 
         let _ = actor_ref
             .tell(HandleSystemEvent {
-                event: Arc::new(SystemEvent::new("order_create", serde_json::json!({"n": 2}))),
+                event: Arc::new(SystemEvent::new(
+                    "order_create",
+                    serde_json::json!({"n": 2}),
+                )),
                 adapter: Arc::new(MockAdapter),
                 ctx: Arc::new(Ctx::new()),
                 handler_id: Some("busy_event".into()),

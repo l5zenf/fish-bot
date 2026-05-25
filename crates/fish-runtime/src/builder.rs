@@ -1,17 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::mailbox;
 use kameo::message::Message as KameoMessage;
-use kameo::Actor;
+use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
-use crate::{
-    AppError, Capability, EventContext, EventHandler, EventHandlerFunc, HandlerContext,
-    HandlerFunc, MessageContext, MessageHandler, Plugin, PluginMetadata, QueueStrategy,
-    RuntimeConfig,
+use crate::handlers::{
+    EventHandler, EventHandlerFunc, HandlerContext, HandlerFunc, MessageHandler,
 };
+use crate::plugin::PluginMetadata;
+use crate::runtime::{QueueStrategy, RuntimeConfig};
+use crate::{ActorBusHandle, AppError, EventContext, MessageContext, Plugin};
 
 #[derive(Clone, Debug)]
 pub enum ActorMailbox {
@@ -27,20 +29,23 @@ impl Default for ActorMailbox {
 
 struct ActorRuntime<A: Actor> {
     actor_ref: OnceCell<ActorRef<A>>,
+    bridge_ready: OnceCell<()>,
+    bridge_installers: RwLock<Vec<BridgeInstaller<A>>>,
     actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
     mailbox: ActorMailbox,
 }
+
+type BridgeInstaller<A> = Arc<dyn Fn(&Arc<ActorRuntime<A>>, ActorBusHandle) + Send + Sync>;
 
 impl<A> ActorRuntime<A>
 where
     A: Actor<Args = A> + Spawn + Send + Sync + 'static,
 {
-    fn new(
-        actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
-        mailbox: ActorMailbox,
-    ) -> Self {
+    fn new(actor_factory: Arc<dyn Fn() -> A + Send + Sync>, mailbox: ActorMailbox) -> Self {
         Self {
             actor_ref: OnceCell::new(),
+            bridge_ready: OnceCell::new(),
+            bridge_installers: RwLock::new(Vec::new()),
             actor_factory,
             mailbox,
         }
@@ -60,17 +65,39 @@ where
             .await
             .clone()
     }
+
+    fn add_bridge(&self, bridge: BridgeInstaller<A>) {
+        self.bridge_installers.write().push(bridge);
+    }
+
+    async fn ensure_registered(self: &Arc<Self>, bus: ActorBusHandle) {
+        self.bridge_ready
+            .get_or_init(|| async {
+                let installers = self.bridge_installers.read().clone();
+                for installer in installers {
+                    installer(self, bus.clone());
+                }
+            })
+            .await;
+    }
 }
 
 pub struct ActorPluginBuilder<A: Actor> {
     metadata: PluginMetadata,
-    capabilities: Vec<Capability>,
     runtime: RuntimeConfig,
     mailbox: ActorMailbox,
     actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
     actor_runtime: Arc<ActorRuntime<A>>,
     message_handlers: Vec<MessageHandler>,
     event_handlers: Vec<EventHandler>,
+}
+
+enum MessageRouteSpec {
+    Exact(String),
+    Prefix(String),
+    Keyword(String),
+    Regex(String),
+    Fallback,
 }
 
 impl<A> ActorPluginBuilder<A>
@@ -90,10 +117,12 @@ where
                 name: name.into(),
                 ..Default::default()
             },
-            capabilities: Vec::new(),
             runtime: RuntimeConfig::default(),
             mailbox: mailbox.clone(),
-            actor_runtime: Arc::new(ActorRuntime::new(Arc::clone(&actor_factory), mailbox.clone())),
+            actor_runtime: Arc::new(ActorRuntime::new(
+                Arc::clone(&actor_factory),
+                mailbox.clone(),
+            )),
             actor_factory,
             message_handlers: Vec::new(),
             event_handlers: Vec::new(),
@@ -112,11 +141,6 @@ where
 
     pub fn author(mut self, author: impl Into<String>) -> Self {
         self.metadata.author = author.into();
-        self
-    }
-
-    pub fn capability(mut self, capability: Capability) -> Self {
-        self.capabilities.push(capability);
         self
     }
 
@@ -145,157 +169,72 @@ where
     }
 
     pub fn on_message<M, F>(
-        mut self,
+        self,
         handler_id: impl Into<String>,
         pattern: impl Into<String>,
         mapper: F,
     ) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let pattern = pattern.into();
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: HandlerFunc = Arc::new(move |cx: HandlerContext| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(MessageContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
-        let mut handler = MessageHandler::exact(handler_id, vec![&pattern], func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
-        self
+        self.register_message_handler(handler_id, MessageRouteSpec::Exact(pattern.into()), mapper)
     }
 
     pub fn on_prefix<M, F>(
-        mut self,
+        self,
         handler_id: impl Into<String>,
         prefix: impl Into<String>,
         mapper: F,
     ) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let prefix = prefix.into();
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: HandlerFunc = Arc::new(move |cx: HandlerContext| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(MessageContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
-        let mut handler = MessageHandler::prefix(handler_id, vec![&prefix], func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
-        self
+        self.register_message_handler(handler_id, MessageRouteSpec::Prefix(prefix.into()), mapper)
     }
 
     pub fn on_keyword<M, F>(
-        mut self,
+        self,
         handler_id: impl Into<String>,
         keyword: impl Into<String>,
         mapper: F,
     ) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let keyword = keyword.into();
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: HandlerFunc = Arc::new(move |cx: HandlerContext| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(MessageContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
-        let mut handler = MessageHandler::keyword(handler_id, vec![&keyword], func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
-        self
+        self.register_message_handler(
+            handler_id,
+            MessageRouteSpec::Keyword(keyword.into()),
+            mapper,
+        )
     }
 
     pub fn on_regex<M, F>(
-        mut self,
+        self,
         handler_id: impl Into<String>,
         pattern: impl Into<String>,
         mapper: F,
     ) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let pattern = pattern.into();
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: HandlerFunc = Arc::new(move |cx: HandlerContext| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(MessageContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
-        let mut handler = MessageHandler::regex(handler_id, &pattern, func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
-        self
+        self.register_message_handler(handler_id, MessageRouteSpec::Regex(pattern.into()), mapper)
     }
 
-    pub fn on_fallback<M, F>(mut self, handler_id: impl Into<String>, mapper: F) -> Self
+    pub fn on_fallback<M, F>(self, handler_id: impl Into<String>, mapper: F) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(MessageContext) -> M + Send + Sync + 'static,
     {
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: HandlerFunc = Arc::new(move |cx: HandlerContext| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(MessageContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
-        let mut handler = MessageHandler::fallback(handler_id, func);
-        handler.timeout = self.runtime.timeout;
-        self.message_handlers.push(handler);
-        self
+        self.register_message_handler(handler_id, MessageRouteSpec::Fallback, mapper)
     }
 
     pub fn on_event<M, F>(
@@ -306,23 +245,18 @@ where
     ) -> Self
     where
         A: KameoMessage<M, Reply = crate::Result<()>>,
-        M: Send + 'static,
+        M: Send + Sync + 'static,
         F: Fn(EventContext) -> M + Send + Sync + 'static,
     {
-        let runtime = Arc::clone(&self.actor_runtime);
-        let mapper = Arc::new(mapper);
-        let func: EventHandlerFunc = Arc::new(move |cx| {
-            let runtime = Arc::clone(&runtime);
-            let mapper = Arc::clone(&mapper);
-            Box::pin(async move {
-                let actor_ref = runtime.actor_ref().await;
-                let msg = mapper(EventContext::new(cx.event, cx.adapter, cx.app_ctx, cx.telemetry));
-                actor_ref
-                    .ask(msg)
-                    .await
-                    .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
-            })
-        });
+        let event_type = event_type.into();
+        let handler_id = handler_id.into();
+        let topic = event_topic(&self.metadata.id, &handler_id);
+        install_message_bridge::<A, M>(&self.actor_runtime, topic.clone());
+        let func = build_event_publisher(
+            topic.clone(),
+            Arc::new(mapper),
+            Arc::clone(&self.actor_runtime),
+        );
         self.event_handlers
             .push(EventHandler::new(event_type, handler_id, func));
         self
@@ -331,23 +265,41 @@ where
     pub fn build(self) -> ActorPlugin<A> {
         ActorPlugin {
             metadata: self.metadata,
-            capabilities: self.capabilities,
             runtime: self.runtime,
             mailbox: self.mailbox.clone(),
-            actor_factory: Arc::clone(&self.actor_factory),
             message_handlers: self.message_handlers,
             event_handlers: self.event_handlers,
             runtime_state: self.actor_runtime,
         }
     }
+
+    fn register_message_handler<M, F>(
+        mut self,
+        handler_id: impl Into<String>,
+        route: MessageRouteSpec,
+        mapper: F,
+    ) -> Self
+    where
+        A: KameoMessage<M, Reply = crate::Result<()>>,
+        M: Send + Sync + 'static,
+        F: Fn(MessageContext) -> M + Send + Sync + 'static,
+    {
+        let handler_id = handler_id.into();
+        let topic = message_topic(&self.metadata.id, &handler_id);
+        install_message_bridge::<A, M>(&self.actor_runtime, topic.clone());
+        let func =
+            build_message_publisher(topic, Arc::new(mapper), Arc::clone(&self.actor_runtime));
+        let mut handler = route.into_handler(handler_id, func);
+        handler.timeout = self.runtime.timeout;
+        self.message_handlers.push(handler);
+        self
+    }
 }
 
 pub struct ActorPlugin<A: Actor> {
     metadata: PluginMetadata,
-    capabilities: Vec<Capability>,
     runtime: RuntimeConfig,
     mailbox: ActorMailbox,
-    actor_factory: Arc<dyn Fn() -> A + Send + Sync>,
     message_handlers: Vec<MessageHandler>,
     event_handlers: Vec<EventHandler>,
     runtime_state: Arc<ActorRuntime<A>>,
@@ -363,10 +315,6 @@ where
 
     pub fn mailbox(&self) -> &ActorMailbox {
         &self.mailbox
-    }
-
-    pub fn actor_factory(&self) -> &Arc<dyn Fn() -> A + Send + Sync> {
-        &self.actor_factory
     }
 }
 
@@ -386,25 +334,138 @@ where
         &self.event_handlers
     }
 
-    fn capabilities(&self) -> &[Capability] {
-        &self.capabilities
-    }
-
     fn runtime_config(&self) -> RuntimeConfig {
         self.runtime.clone()
     }
 }
 
+impl MessageRouteSpec {
+    fn into_handler(self, handler_id: String, func: HandlerFunc) -> MessageHandler {
+        match self {
+            Self::Exact(pattern) => MessageHandler::exact(handler_id, vec![pattern.as_str()], func),
+            Self::Prefix(prefix) => MessageHandler::prefix(handler_id, vec![prefix.as_str()], func),
+            Self::Keyword(keyword) => {
+                MessageHandler::keyword(handler_id, vec![keyword.as_str()], func)
+            }
+            Self::Regex(pattern) => MessageHandler::regex(handler_id, &pattern, func),
+            Self::Fallback => MessageHandler::fallback(handler_id, func),
+        }
+    }
+}
+
+fn message_topic(plugin_id: &str, handler_id: &str) -> String {
+    format!("plugin:{plugin_id}:message:{handler_id}")
+}
+
+fn event_topic(plugin_id: &str, handler_id: &str) -> String {
+    format!("plugin:{plugin_id}:event:{handler_id}")
+}
+
+fn build_message_publisher<A, M, F>(
+    topic: String,
+    mapper: Arc<F>,
+    runtime: Arc<ActorRuntime<A>>,
+) -> HandlerFunc
+where
+    A: Actor<Args = A> + Spawn + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+    F: Fn(MessageContext) -> M + Send + Sync + 'static,
+{
+    Arc::new(move |cx: HandlerContext| {
+        let topic = topic.clone();
+        let mapper = Arc::clone(&mapper);
+        let runtime = Arc::clone(&runtime);
+        Box::pin(async move {
+            let app_ctx = Arc::clone(&cx.app_ctx);
+            let bus = app_ctx
+                .get::<ActorBusHandle>()
+                .map(|handle| (*handle).clone())
+                .ok_or_else(|| AppError::internal("actor bus is unavailable"))?;
+            runtime.ensure_registered(bus.clone()).await;
+            let message = mapper(MessageContext::new(
+                cx.event,
+                cx.adapter,
+                app_ctx,
+                cx.telemetry,
+            ));
+            bus.publish(topic, message).await
+        })
+    })
+}
+
+fn build_event_publisher<A, M, F>(
+    topic: String,
+    mapper: Arc<F>,
+    runtime: Arc<ActorRuntime<A>>,
+) -> EventHandlerFunc
+where
+    A: Actor<Args = A> + Spawn + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+    F: Fn(EventContext) -> M + Send + Sync + 'static,
+{
+    Arc::new(move |cx| {
+        let topic = topic.clone();
+        let mapper = Arc::clone(&mapper);
+        let runtime = Arc::clone(&runtime);
+        Box::pin(async move {
+            let app_ctx = Arc::clone(&cx.app_ctx);
+            let bus = app_ctx
+                .get::<ActorBusHandle>()
+                .map(|handle| (*handle).clone())
+                .ok_or_else(|| AppError::internal("actor bus is unavailable"))?;
+            runtime.ensure_registered(bus.clone()).await;
+            let message = mapper(EventContext::new(
+                cx.event,
+                cx.adapter,
+                app_ctx,
+                cx.telemetry,
+            ));
+            bus.publish(topic, message).await
+        })
+    })
+}
+
+fn install_message_bridge<A, M>(runtime: &Arc<ActorRuntime<A>>, topic: String)
+where
+    A: Actor<Args = A> + Spawn + Send + Sync + 'static,
+    A: KameoMessage<M, Reply = crate::Result<()>>,
+    M: Send + Sync + 'static,
+{
+    runtime.add_bridge(Arc::new(move |runtime, bus| {
+        let topic = topic.clone();
+        bus.subscribe::<M, _, _>(topic.clone(), {
+            let runtime = Arc::clone(runtime);
+            move |payload| {
+                let runtime = Arc::clone(&runtime);
+                let topic = topic.clone();
+                async move {
+                    let actor_ref = runtime.actor_ref().await;
+                    let message = Arc::try_unwrap(payload).map_err(|_| {
+                        AppError::internal(format!(
+                            "actor bus topic `{topic}` requires a single subscriber"
+                        ))
+                    })?;
+                    actor_ref
+                        .ask(message)
+                        .await
+                        .map_err(|err| AppError::internal(format!("actor ask failed: {err}")))
+                }
+            }
+        });
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BaseAdapter;
+    use crate::handlers::EventHandlerContext;
+    use crate::{ActorBusHandle, BaseAdapter, RuntimeActorBus};
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
     use fish_core::message::MessageChain;
+    use kameo::message::Context;
     use std::convert::Infallible;
     use std::sync::Arc;
-    use kameo::message::Context;
 
     struct NoopAdapter;
 
@@ -432,7 +493,10 @@ mod tests {
         type Args = Self;
         type Error = Infallible;
 
-        async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, Self::Error> {
+        async fn on_start(
+            args: Self::Args,
+            _actor_ref: ActorRef<Self>,
+        ) -> Result<Self, Self::Error> {
             Ok(args)
         }
     }
@@ -486,6 +550,9 @@ mod tests {
             .on_message("ping", "/ping", Ping)
             .build();
 
+        let app_ctx = Arc::new(fish_core::ctx::Ctx::new());
+        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+
         let handler = &plugin.message_handlers()[0];
         (handler.func)(HandlerContext::__new(
             fish_core::event::MessageEvent::new(
@@ -496,7 +563,7 @@ mod tests {
                 serde_json::json!({}),
             ),
             Arc::new(NoopAdapter),
-            Arc::new(fish_core::ctx::Ctx::new()),
+            app_ctx,
             Arc::new(fish_core::telemetry::Telemetry::new()),
             None,
         ))
@@ -513,14 +580,17 @@ mod tests {
             .on_event("order_create", "order_created", OrderCreated)
             .build();
 
+        let app_ctx = Arc::new(fish_core::ctx::Ctx::new());
+        app_ctx.insert(ActorBusHandle::new(Arc::new(RuntimeActorBus::default())));
+
         let handler = &plugin.event_handlers()[0];
-        (handler.func)(crate::EventHandlerContext::__new(
+        (handler.func)(EventHandlerContext::__new(
             Arc::new(fish_core::event::SystemEvent::new(
                 "order_create",
                 serde_json::json!({}),
             )),
             Arc::new(NoopAdapter),
-            Arc::new(fish_core::ctx::Ctx::new()),
+            app_ctx,
             Arc::new(fish_core::telemetry::Telemetry::new()),
             None,
         ))

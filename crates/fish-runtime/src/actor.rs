@@ -7,9 +7,9 @@ use std::time::Duration;
 use kameo::prelude::*;
 use tokio::sync::Semaphore;
 
-use crate::{
-    BaseAdapter, HandlerContext, MessageHandler, Plugin, QueueStrategy, Result, RuntimeConfig,
-};
+use crate::handlers::{HandlerContext, MessageHandler};
+use crate::runtime::{QueueStrategy, RuntimeConfig};
+use crate::{BaseAdapter, Plugin, Result};
 use fish_core::ctx::Ctx;
 use fish_core::event::MessageEvent;
 use fish_core::telemetry::Telemetry;
@@ -95,7 +95,8 @@ impl PluginActor {
                                     let _permit = permit;
                                     let started = std::time::Instant::now();
                                     let result =
-                                        tokio::time::timeout(task.handler_timeout, task.future).await;
+                                        tokio::time::timeout(task.handler_timeout, task.future)
+                                            .await;
                                     match result {
                                         Ok(Ok(())) => {
                                             task.telemetry
@@ -293,14 +294,8 @@ impl PluginActor {
             Arc::clone(&telemetry),
             self.plugin_state.clone(),
         ));
-        self.dispatch_task_or_enqueue(
-            &handler.id,
-            handler.timeout,
-            plugin_id,
-            future,
-            telemetry,
-        )
-        .await;
+        self.dispatch_task_or_enqueue(&handler.id, handler.timeout, plugin_id, future, telemetry)
+            .await;
     }
 
     pub(crate) async fn dispatch_event_or_enqueue(
@@ -327,7 +322,9 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use crate::{BaseAdapter, MessageHandler, Plugin, PluginMetadata, RouteHint};
+    use crate::handlers::{HandlerContext, MessageHandler, RouteHint};
+    use crate::plugin::PluginMetadata;
+    use crate::{BaseAdapter, Plugin};
     use async_trait::async_trait;
     use fish_core::AdapterEventSink;
     use fish_core::ctx::Ctx;
