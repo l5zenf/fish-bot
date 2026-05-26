@@ -23,6 +23,8 @@ impl RuntimeHost {
         ctx: Arc<Ctx>,
         telemetry: Arc<Telemetry>,
     ) -> Self {
+        adapter.register_context(ctx.as_ref());
+
         if ctx.get::<ActorBusHandle>().is_none() {
             ctx.insert(ActorBusHandle::runtime_default());
         }
@@ -282,6 +284,9 @@ mod tests {
     use fish_core::error::{AppError, Result};
     use fish_core::message::MessageChain;
     use fish_core::rule::is_fullmatch;
+
+    #[derive(Clone)]
+    struct AdapterMarker(&'static str);
 
     struct MockAdapter;
     #[async_trait]
@@ -642,5 +647,38 @@ mod tests {
         let guard = recorded.lock().await;
         assert_eq!(*guard, "multi segment reply");
         Ok(())
+    }
+
+    #[test]
+    fn t4_10_runtime_host_registers_adapter_context() {
+        struct ContextAdapter;
+
+        #[async_trait]
+        impl BaseAdapter for ContextAdapter {
+            fn register_context(&self, ctx: &Ctx) {
+                ctx.insert(AdapterMarker("fish-client"));
+            }
+
+            async fn send(&self, _: &str, _: &MessageChain, _: Option<&str>) -> Result<()> {
+                Ok(())
+            }
+
+            async fn run(&self, _: Arc<dyn AdapterEventSink>) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let ctx = Arc::new(Ctx::new());
+        let _host = RuntimeHost::new(
+            Arc::new(ContextAdapter),
+            vec![],
+            Arc::clone(&ctx),
+            Arc::new(Telemetry::new()),
+        );
+
+        let marker = ctx
+            .get::<AdapterMarker>()
+            .expect("adapter should register app context");
+        assert_eq!(marker.0, "fish-client");
     }
 }

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::event::{MessageEvent, SystemEvent};
 use crate::message::MessageChain;
@@ -15,6 +16,8 @@ pub trait AdapterEventSink: Send + Sync {
 
 #[async_trait]
 pub trait BaseAdapter: Send + Sync {
+    fn register_context(&self, _ctx: &Ctx) {}
+
     async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()>;
 
     async fn run(&self, sink: std::sync::Arc<dyn AdapterEventSink>) -> Result<()>;

@@ -420,6 +420,7 @@ dependencies = [
  "fish-core",
  "fish-rt-adapter",
  "fish-runtime",
+ "reqwest",
  "serde_json",
  "tokio",
 ]

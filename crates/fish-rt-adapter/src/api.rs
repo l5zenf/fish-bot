@@ -1,5 +1,4 @@
 use fish_core::error::{AppError, Result};
-
 fn http_err(e: reqwest::Error) -> AppError {
     AppError::http(e.to_string())
 }
@@ -125,6 +124,10 @@ impl FishAPI {
 
     pub(crate) fn device_id(&self) -> String {
         self.device_id.clone()
+    }
+
+    pub(crate) fn client(&self) -> reqwest::Client {
+        self.client.clone()
     }
 
     pub(crate) async fn my_id(&self) -> String {

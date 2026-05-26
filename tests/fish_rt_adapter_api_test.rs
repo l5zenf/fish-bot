@@ -1,14 +1,35 @@
 use fish_rt_adapter::FishWebSocketAdapter as AdapterFishWebSocketAdapter;
-use fish_rt_adapter::RuntimeHost;
+use fish_rt_adapter::{BaseAdapter, ClientProvider, Ctx, FishHttpClient, RuntimeHost, Telemetry};
 use fish_rt_adapter::plugin;
 use fish_rt_adapter::prelude::*;
 use std::fs;
+use std::sync::Arc;
 
 #[test]
 fn fish_adapter_is_available_from_adapter_facade() {
     let _from_adapter = AdapterFishWebSocketAdapter::new();
     let _runtime_type = std::mem::size_of::<Option<RuntimeHost>>();
     let _plugin = AdapterFacadePlugin;
+}
+
+#[test]
+fn fish_client_types_are_available_from_adapter_facade() {
+    let _client = std::mem::size_of::<Option<FishHttpClient>>();
+    let _trait_ref: Option<&dyn ClientProvider<Client = reqwest::Client>> = None;
+}
+
+#[test]
+fn runtime_host_injects_fish_http_client() {
+    let adapter: Arc<dyn BaseAdapter> = Arc::new(AdapterFishWebSocketAdapter::new());
+    let ctx = Arc::new(Ctx::new());
+
+    let _host = RuntimeHost::new(adapter, vec![], Arc::clone(&ctx), Arc::new(Telemetry::new()));
+
+    let fish = ctx
+        .get::<FishHttpClient>()
+        .expect("fish http client should be registered");
+    let _client = fish.client();
+    let _client_ref: &reqwest::Client = fish.client_ref();
 }
 
 #[test]

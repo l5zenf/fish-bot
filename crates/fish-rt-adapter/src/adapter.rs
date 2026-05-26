@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fish_core::AdapterEventSink;
+use fish_core::ctx::Ctx;
 use fish_core::error::{AppError, Result};
 use fish_core::event::MessageEvent;
 use fish_core::message::{MessageChain, MessageSegment};
@@ -16,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::api::FishAPI;
 use super::auth::AuthManager;
+use super::client::FishHttpClient;
 use super::connection::FishConnection;
 use super::sign::{
     decode_python_like_msgpack, decode_python_like_payload, generate_mid, generate_uuid,
@@ -404,6 +406,10 @@ impl Clone for FishWebSocketAdapter {
 
 #[async_trait]
 impl BaseAdapter for FishWebSocketAdapter {
+    fn register_context(&self, ctx: &Ctx) {
+        ctx.insert(FishHttpClient::new(self.api.client()));
+    }
+
     async fn send(&self, target_id: &str, message: &MessageChain, cid: Option<&str>) -> Result<()> {
         let my_id = self.api.my_id().await;
         let msg = build_send_message(target_id, message, cid, &my_id)?;

@@ -1,11 +1,13 @@
 mod adapter;
 mod api;
 mod auth;
+mod client;
 mod connection;
 mod sign;
 
 pub use adapter::FishWebSocketAdapter;
 pub use auth::{CookieImportReport, import_browser_cookies};
+pub use client::{ClientProvider, FishHttpClient};
 pub use fish_runtime::{
     ActorBusHandle, ActorPluginBuilder, AdapterEventSink, AppError, BaseAdapter, Ctx, EventContext,
     MatchList, MessageChain, MessageChainItem, MessageContext, MessageEvent, MessageSegment,
