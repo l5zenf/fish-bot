@@ -1,4 +1,7 @@
 use fish_rt_adapter::ActorPluginBuilder;
+use fish_rt_adapter::AppError;
+use fish_rt_adapter::ClientProvider;
+use fish_rt_adapter::FishHttpClient;
 use fish_rt_adapter::prelude::*;
 use kameo::Actor;
 use kameo::message::{Context, Message};
@@ -39,9 +42,17 @@ impl Message<KeywordHit> for CounterActor {
         msg: KeywordHit,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let KeywordHit(ctx) = msg;
+        let fish = ctx
+            .app_ctx()
+            .get::<FishHttpClient>()
+            .ok_or_else(|| AppError::Internal {
+                details: "get fish cli error".to_string(),
+            })?;
+        let _cli = fish.client();
+
         self.seen += 1;
-        msg.0
-            .reply(format!("actor keyword #{}: {}", self.seen, msg.0.text()))
+        ctx.reply(format!("actor keyword #{}: {}", self.seen, ctx.text()))
             .await
     }
 }
